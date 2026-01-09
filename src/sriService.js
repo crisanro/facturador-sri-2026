@@ -1,178 +1,152 @@
+const { createClient } = require('@supabase/supabase-js');
 const { create } = require('xmlbuilder2');
 const { signInvoiceXml } = require('ec-sri-invoice-signer');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
-const { XMLParser } = require('fast-xml-parser');
 const { generarClaveAcceso } = require('./utils');
+const { calcularTotalesEImpuestos } = require('./calculadoraSri'); // <--- NUEVO
 
-// Configuración
-const PATH_FIRMA = path.join(__dirname, '../firmas/firma.p12');
-const PASS_FIRMA = process.env.FIRMA_PASSWORD || 'TuContrasena';
+// Iniciar Supabase
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-const URLS = {
-    pruebas: {
-        recepcion: 'https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl',
-        autorizacion: 'https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl'
-    },
-    produccion: {
-        recepcion: 'https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl',
-        autorizacion: 'https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl'
-    }
-};
+async function facturarInteligente(inputCliente) {
 
-// Instancia del parser para leer respuestas del SRI
-const parser = new XMLParser({ ignoreAttributes: false });
+    // 1. Obtener datos del Emisor desde la BD (Tu empresa)
+    // Asumimos que mandas el RUC del emisor en el input, o usas un ID fijo si es solo para ti
+    const { data: emisor, error } = await supabase
+        .from('emisores')
+        .select('*')
+        .eq('ruc', inputCliente.rucEmisor)
+        .single();
 
-async function enviarAlSRI(xmlFirmadoBase64, claveAcceso, ambiente = 'pruebas') {
-    const urls = ambiente === 'produccion' ? URLS.produccion : URLS.pruebas;
+    if (error || !emisor) throw new Error("Emisor no encontrado en Base de Datos");
 
-    // --- 1. ENVÍO A RECEPCIÓN ---
-    const soapRecepcion = `
-    <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.recepcion">
-       <soapenv:Header/>
-       <soapenv:Body>
-          <ec:validarComprobante>
-             <xml>${xmlFirmadoBase64}</xml>
-          </ec:validarComprobante>
-       </soapenv:Body>
-    </soapenv:Envelope>`;
+    // 2. Gestionar Secuencial (Incrementar en BD)
+    const nuevoSecuencialInt = emisor.secuencial_actual + 1;
+    // Formatear a 9 dígitos (ej: 000000123)
+    const secuencialString = nuevoSecuencialInt.toString().padStart(9, '0');
 
-    try {
-        console.log("--> Enviando a Recepción SRI...");
-        const { data: dataRecepcion } = await axios.post(urls.recepcion, soapRecepcion, {
-            headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
-        });
+    // Actualizar BD inmediatamente para reservar el número (Optimista)
+    await supabase.from('emisores').update({ secuencial_actual: nuevoSecuencialInt }).eq('id', emisor.id);
 
-        // Analizar respuesta
-        const jsonRecepcion = parser.parse(dataRecepcion);
-        const respuestaRecepcion = jsonRecepcion['soap:Envelope']['soap:Body']['ns2:validarComprobanteResponse']['RespuestaRecepcionComprobante'];
+    // 3. USAR EL CEREBRO MATEMÁTICO
+    // El frontend solo envió items con cantidad, precio y tarifa. Nosotros calculamos todo.
+    const calculos = calcularTotalesEImpuestos(inputCliente.items);
 
-        if (respuestaRecepcion.estado !== 'RECIBIDA') {
-            return { exito: false, etapa: 'RECEPCION', detalle: respuestaRecepcion };
-        }
-
-        // --- 2. SOLICITUD DE AUTORIZACIÓN ---
-        // (A veces el SRI tarda milisegundos, es "Offline" pero casi instantáneo)
-        console.log("--> Solicitando Autorización SRI...");
-
-        const soapAutorizacion = `
-        <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
-           <soapenv:Header/>
-           <soapenv:Body>
-              <ec:autorizacionComprobante>
-                 <claveAccesoComprobante>${claveAcceso}</claveAccesoComprobante>
-              </ec:autorizacionComprobante>
-           </soapenv:Body>
-        </soapenv:Envelope>`;
-
-        const { data: dataAuth } = await axios.post(urls.autorizacion, soapAutorizacion, {
-            headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
-        });
-
-        const jsonAuth = parser.parse(dataAuth);
-        const respuestaAuth = jsonAuth['soap:Envelope']['soap:Body']['ns2:autorizacionComprobanteResponse']['RespuestaAutorizacionComprobante'];
-
-        // Verificar si fue autorizada (puede estar "EN PROCESO" o "NO AUTORIZADO")
-        const autorizacion = respuestaAuth.autorizaciones?.autorizacion;
-        const estadoFinal = Array.isArray(autorizacion) ? autorizacion[0].estado : autorizacion?.estado;
-
-        if (estadoFinal === 'AUTORIZADO') {
-            return { exito: true, etapa: 'AUTORIZACION', detalle: autorizacion };
-        } else {
-            return { exito: false, etapa: 'AUTORIZACION', detalle: autorizacion };
-        }
-
-    } catch (error) {
-        console.error("Error de conexión SRI:", error.message);
-        return { exito: false, error: error.message };
-    }
-}
-
-// Función Principal exportada
-async function procesarFacturaCompleta(datos) {
-    // 1. Generar Clave (Igual que antes)
+    // 4. Generar Clave de Acceso
+    const hoy = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
     const claveAcceso = generarClaveAcceso(
-        datos.fechaEmision, '01', datos.emisor.ruc, '1',
-        datos.emisor.serie, datos.secuencial
+        hoy,
+        '01',
+        emisor.ruc,
+        emisor.ambiente.toString(),
+        '001001', // Asumimos estab 001 pto 001 por ahora (puedes guardarlo en BD también)
+        secuencialString
     );
 
-    // 2. Construir XML (Resumido para el ejemplo, usa tu función completa anterior)
+    // 5. Construir XML (Usando los datos calculados)
     const doc = create({ version: '1.0', encoding: 'UTF-8' })
         .ele('factura', { id: 'comprobante', version: '1.1.0' });
 
-    // ... AQUÍ VA TODA TU LÓGICA DE CONSTRUCCIÓN DE XML DEL PASO ANTERIOR ...
-    // (Asegúrate de copiar la lógica de llenado de tags aquí)
+    // Info Tributaria
     const infoTrib = doc.ele('infoTributaria');
-    infoTrib.ele('ambiente').txt('1');
+    infoTrib.ele('ambiente').txt(emisor.ambiente);
     infoTrib.ele('tipoEmision').txt('1');
-    infoTrib.ele('razonSocial').txt(datos.emisor.razonSocial);
-    infoTrib.ele('ruc').txt(datos.emisor.ruc);
+    infoTrib.ele('razonSocial').txt(emisor.razon_social);
+    infoTrib.ele('ruc').txt(emisor.ruc);
     infoTrib.ele('claveAcceso').txt(claveAcceso);
     infoTrib.ele('codDoc').txt('01');
-    infoTrib.ele('estab').txt(datos.emisor.serie.substring(0, 3));
-    infoTrib.ele('ptoEmi').txt(datos.emisor.serie.substring(3, 6));
-    infoTrib.ele('secuencial').txt(datos.secuencial);
-    infoTrib.ele('dirMatriz').txt(datos.emisor.direccion);
+    infoTrib.ele('estab').txt('001');
+    infoTrib.ele('ptoEmi').txt('001');
+    infoTrib.ele('secuencial').txt(secuencialString);
+    infoTrib.ele('dirMatriz').txt(emisor.direccion_matriz);
 
+    // Info Factura
     const infoFac = doc.ele('infoFactura');
-    const fechaVisual = datos.fechaEmision.split('-').reverse().join('/');
+    const fechaVisual = hoy.split('-').reverse().join('/'); // DD/MM/YYYY
     infoFac.ele('fechaEmision').txt(fechaVisual);
-    infoFac.ele('dirEstablecimiento').txt(datos.emisor.direccion);
-    infoFac.ele('obligadoContabilidad').txt('NO');
-    infoFac.ele('tipoIdentificacionComprador').txt('05');
-    infoFac.ele('razonSocialComprador').txt(datos.cliente.nombre);
-    infoFac.ele('identificacionComprador').txt(datos.cliente.identificacion);
-    infoFac.ele('totalSinImpuestos').txt(datos.totales.subtotal);
-    infoFac.ele('totalDescuento').txt('0.00');
+    infoFac.ele('dirEstablecimiento').txt(emisor.direccion_matriz);
+    infoFac.ele('obligadoContabilidad').txt('NO'); // O leer de BD
 
-    const totalConImp = infoFac.ele('totalConImpuestos');
-    const totalImp = totalConImp.ele('totalImpuesto');
-    totalImp.ele('codigo').txt('2');
-    totalImp.ele('codigoPorcentaje').txt('2');
-    totalImp.ele('baseImponible').txt(datos.totales.subtotal);
-    totalImp.ele('valor').txt(datos.totales.iva);
+    // Datos del Cliente (Vienen del input)
+    infoFac.ele('tipoIdentificacionComprador').txt(inputCliente.cliente.tipoId); // 04 RUC, 05 Cedula, 07 Consumidor
+    infoFac.ele('razonSocialComprador').txt(inputCliente.cliente.razonSocial);
+    infoFac.ele('identificacionComprador').txt(inputCliente.cliente.identificacion);
+
+    // Totales CALCULADOS AUTOMÁTICAMENTE
+    infoFac.ele('totalSinImpuestos').txt(calculos.totales.totalSinImpuestos);
+    infoFac.ele('totalDescuento').txt(calculos.totales.totalDescuento);
+
+    const totalConImpuestosXml = infoFac.ele('totalConImpuestos');
+    calculos.totalConImpuestosXml.forEach(imp => {
+        const i = totalConImpuestosXml.ele('totalImpuesto');
+        i.ele('codigo').txt(imp.codigo);
+        i.ele('codigoPorcentaje').txt(imp.codigoPorcentaje);
+        i.ele('baseImponible').txt(imp.baseImponible);
+        i.ele('valor').txt(imp.valor);
+    });
 
     infoFac.ele('propina').txt('0.00');
-    infoFac.ele('importeTotal').txt(datos.totales.total);
+    infoFac.ele('importeTotal').txt(calculos.totales.importeTotal);
     infoFac.ele('moneda').txt('DOLAR');
 
+    // Pagos
+    const pagos = infoFac.ele('pagos');
+    const pago = pagos.ele('pago');
+    pago.ele('formaPago').txt('20'); // 20: Otros con sistema financiero (Estándar)
+    pago.ele('total').txt(calculos.totales.importeTotal);
+
+    // Detalles (Items)
     const detalles = doc.ele('detalles');
-    datos.items.forEach(item => {
+    calculos.detallesXml.forEach(item => {
         const det = detalles.ele('detalle');
-        det.ele('codigoPrincipal').txt(item.codigo);
-        det.ele('descripcion').txt(item.nombre);
+        det.ele('codigoPrincipal').txt(item.codigoPrincipal);
+        det.ele('descripcion').txt(item.descripcion);
         det.ele('cantidad').txt(item.cantidad);
-        det.ele('precioUnitario').txt(item.precio);
-        det.ele('descuento').txt('0.00');
-        det.ele('precioTotalSinImpuestos').txt(item.total);
+        det.ele('precioUnitario').txt(item.precioUnitario);
+        det.ele('descuento').txt(item.descuento);
+        det.ele('precioTotalSinImpuestos').txt(item.precioTotalSinImpuesto);
+
         const imps = det.ele('impuestos');
-        const imp = imps.ele('impuesto');
-        imp.ele('codigo').txt('2');
-        imp.ele('codigoPorcentaje').txt('2');
-        imp.ele('tarifa').txt('12');
-        imp.ele('baseImponible').txt(item.total);
-        imp.ele('valor').txt((item.total * 0.12).toFixed(2));
+        item.impuestos.forEach(impItem => {
+            const imp = imps.ele('impuesto');
+            imp.ele('codigo').txt(impItem.codigo);
+            imp.ele('codigoPorcentaje').txt(impItem.codigoPorcentaje);
+            imp.ele('tarifa').txt(impItem.tarifa);
+            imp.ele('baseImponible').txt(impItem.baseImponible);
+            imp.ele('valor').txt(impItem.valor);
+        });
     });
 
     const xmlString = doc.end({ prettyPrint: true });
 
-    // 3. FIRMAR
-    if (!fs.existsSync(PATH_FIRMA)) throw new Error("Falta archivo .p12");
-    const p12Buffer = fs.readFileSync(PATH_FIRMA);
-    const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: PASS_FIRMA });
+    // 6. FIRMAR
+    // Nota: En un sistema real, el archivo p12 debería estar en un bucket seguro o desencriptarse temporalmente
+    const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
+    const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
 
-    // 4. ENVIAR AL SRI (Aquí conectamos todo)
-    // Convertir a base64 para envío SOAP
-    const xmlBase64 = Buffer.from(xmlFirmado).toString('base64');
+    // 7. GUARDAR EN BASE DE DATOS (Antes de enviar al SRI para tener respaldo)
+    const { data: facturaGuardada, error: errorDB } = await supabase
+        .from('facturas')
+        .insert({
+            emisor_id: emisor.id,
+            clave_acceso: claveAcceso,
+            secuencial: secuencialString,
+            total_sin_impuestos: calculos.totales.totalSinImpuestos,
+            total_iva: calculos.totales.totalIva,
+            importe_total: calculos.totales.importeTotal,
+            xml_generado: xmlFirmado,
+            estado_sri: 'FIRMADO'
+        })
+        .select()
+        .single();
 
-    const resultadoSRI = await enviarAlSRI(xmlBase64, claveAcceso, 'pruebas');
-
+    // 8. Retornar datos para que el controlador envíe al SRI
     return {
+        facturaId: facturaGuardada.id,
         claveAcceso,
-        xmlGenerado: xmlFirmado,
-        resultadoSRI
+        xmlFirmado
     };
 }
 
-module.exports = { procesarFacturaCompleta };
+module.exports = { facturarInteligente };
