@@ -43,22 +43,22 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     });
 
     // 6. Add KeyInfo (X509Certificate)
-    // xml-crypto usually adds KeyInfo automatically if provided? No, usually manual or via getKeyInfoContent
-
-    // Custom KeyInfo Provider
+    // TEMPORARILY REMOVED to debug "Private key is required"
+    /*
     sig.keyInfoProvider = {
         getKeyInfo: function (key, prefix) {
             const certBody = certPem.replace(/-----BEGIN CERTIFICATE-----/g, '')
-                .replace(/-----END CERTIFICATE-----/g, '')
-                .replace(/\r\n/g, '')
-                .replace(/\n/g, '');
+                                    .replace(/-----END CERTIFICATE-----/g, '')
+                                    .replace(/\r\n/g, '')
+                                    .replace(/\n/g, '');
             prefix = prefix ? prefix + ':' : '';
             return `<${prefix}X509Data><${prefix}X509Certificate>${certBody}</${prefix}X509Certificate></${prefix}X509Data>`;
         },
-        getKey: function (keyInfo) {
+        getKey: function(keyInfo) {
             return keyPem;
         }
     };
+    */
 
     // 7. Compute Signature
     sig.computeSignature(xml);
