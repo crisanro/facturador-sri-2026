@@ -3,51 +3,53 @@ const { create } = require('xmlbuilder2');
 const { signInvoiceXml } = require('ec-sri-invoice-signer');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
+const { XMLParser } = require('fast-xml-parser');
 const { generarClaveAcceso } = require('./utils');
-const { calcularTotalesEImpuestos } = require('./calculadoraSri'); // <--- NUEVO
+const { calcularTotalesEImpuestos } = require('./calculadoraSri');
 
 // Iniciar Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+const parser = new XMLParser({ ignoreAttributes: false });
 
-async function facturarInteligente(inputCliente) {
+const URLS_SRI = {
+    pruebas: {
+        recepcion: 'https://celcer.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl',
+        autorizacion: 'https://celcer.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl'
+    },
+    produccion: {
+        recepcion: 'https://cel.sri.gob.ec/comprobantes-electronicos-ws/RecepcionComprobantesOffline?wsdl',
+        autorizacion: 'https://cel.sri.gob.ec/comprobantes-electronicos-ws/AutorizacionComprobantesOffline?wsdl'
+    }
+};
 
-    // 1. Obtener datos del Emisor desde la BD (Tu empresa)
-    // Asumimos que mandas el RUC del emisor en el input, o usas un ID fijo si es solo para ti
+async function procesarFacturaCompleta(inputCliente) {
+    console.log("1. Iniciando proceso para:", inputCliente.rucEmisor);
+
+    // --- A. BUSCAR EMISOR EN BD ---
     const { data: emisor, error } = await supabase
         .from('emisores')
         .select('*')
         .eq('ruc', inputCliente.rucEmisor)
         .single();
+        
+    if(error || !emisor) throw new Error("Emisor no encontrado en Supabase. ¿Ya lo registraste?");
 
-    if (error || !emisor) throw new Error("Emisor no encontrado en Base de Datos");
+    // --- B. SECUENCIAL ---
+    const nuevoSecuencial = emisor.secuencial_actual + 1;
+    const secuencialStr = nuevoSecuencial.toString().padStart(9, '0');
+    await supabase.from('emisores').update({ secuencial_actual: nuevoSecuencial }).eq('id', emisor.id);
 
-    // 2. Gestionar Secuencial (Incrementar en BD)
-    const nuevoSecuencialInt = emisor.secuencial_actual + 1;
-    // Formatear a 9 dígitos (ej: 000000123)
-    const secuencialString = nuevoSecuencialInt.toString().padStart(9, '0');
-
-    // Actualizar BD inmediatamente para reservar el número (Optimista)
-    await supabase.from('emisores').update({ secuencial_actual: nuevoSecuencialInt }).eq('id', emisor.id);
-
-    // 3. USAR EL CEREBRO MATEMÁTICO
-    // El frontend solo envió items con cantidad, precio y tarifa. Nosotros calculamos todo.
+    // --- C. CALCULOS MATEMÁTICOS ---
     const calculos = calcularTotalesEImpuestos(inputCliente.items);
 
-    // 4. Generar Clave de Acceso
-    const hoy = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-    const claveAcceso = generarClaveAcceso(
-        hoy,
-        '01',
-        emisor.ruc,
-        emisor.ambiente.toString(),
-        '001001', // Asumimos estab 001 pto 001 por ahora (puedes guardarlo en BD también)
-        secuencialString
-    );
+    // --- D. GENERAR XML ---
+    const hoy = new Date().toISOString().split('T')[0];
+    // Nota: El ambiente viene de la BD del emisor (1 o 2)
+    const claveAcceso = generarClaveAcceso(hoy, '01', emisor.ruc, emisor.ambiente.toString(), '001001', secuencialStr);
 
-    // 5. Construir XML (Usando los datos calculados)
-    const doc = create({ version: '1.0', encoding: 'UTF-8' })
-        .ele('factura', { id: 'comprobante', version: '1.1.0' });
-
+    const doc = create({ version: '1.0', encoding: 'UTF-8' }).ele('factura', { id: 'comprobante', version: '1.1.0' });
+    
     // Info Tributaria
     const infoTrib = doc.ele('infoTributaria');
     infoTrib.ele('ambiente').txt(emisor.ambiente);
@@ -56,27 +58,22 @@ async function facturarInteligente(inputCliente) {
     infoTrib.ele('ruc').txt(emisor.ruc);
     infoTrib.ele('claveAcceso').txt(claveAcceso);
     infoTrib.ele('codDoc').txt('01');
-    infoTrib.ele('estab').txt('001');
-    infoTrib.ele('ptoEmi').txt('001');
-    infoTrib.ele('secuencial').txt(secuencialString);
+    infoTrib.ele('estab').txt('001'); // Podrías parametrizar esto en la BD también
+    infoTrib.ele('ptoEmi').txt('001'); 
+    infoTrib.ele('secuencial').txt(secuencialStr);
     infoTrib.ele('dirMatriz').txt(emisor.direccion_matriz);
 
     // Info Factura
     const infoFac = doc.ele('infoFactura');
-    const fechaVisual = hoy.split('-').reverse().join('/'); // DD/MM/YYYY
-    infoFac.ele('fechaEmision').txt(fechaVisual);
+    infoFac.ele('fechaEmision').txt(hoy.split('-').reverse().join('/'));
     infoFac.ele('dirEstablecimiento').txt(emisor.direccion_matriz);
-    infoFac.ele('obligadoContabilidad').txt('NO'); // O leer de BD
-
-    // Datos del Cliente (Vienen del input)
-    infoFac.ele('tipoIdentificacionComprador').txt(inputCliente.cliente.tipoId); // 04 RUC, 05 Cedula, 07 Consumidor
+    infoFac.ele('obligadoContabilidad').txt('NO');
+    infoFac.ele('tipoIdentificacionComprador').txt(inputCliente.cliente.tipoId);
     infoFac.ele('razonSocialComprador').txt(inputCliente.cliente.razonSocial);
     infoFac.ele('identificacionComprador').txt(inputCliente.cliente.identificacion);
-
-    // Totales CALCULADOS AUTOMÁTICAMENTE
     infoFac.ele('totalSinImpuestos').txt(calculos.totales.totalSinImpuestos);
     infoFac.ele('totalDescuento').txt(calculos.totales.totalDescuento);
-
+    
     const totalConImpuestosXml = infoFac.ele('totalConImpuestos');
     calculos.totalConImpuestosXml.forEach(imp => {
         const i = totalConImpuestosXml.ele('totalImpuesto');
@@ -89,14 +86,11 @@ async function facturarInteligente(inputCliente) {
     infoFac.ele('propina').txt('0.00');
     infoFac.ele('importeTotal').txt(calculos.totales.importeTotal);
     infoFac.ele('moneda').txt('DOLAR');
-
-    // Pagos
+    
     const pagos = infoFac.ele('pagos');
-    const pago = pagos.ele('pago');
-    pago.ele('formaPago').txt('20'); // 20: Otros con sistema financiero (Estándar)
-    pago.ele('total').txt(calculos.totales.importeTotal);
+    pagos.ele('pago').ele('formaPago').txt('20').up().ele('total').txt(calculos.totales.importeTotal);
 
-    // Detalles (Items)
+    // Detalles
     const detalles = doc.ele('detalles');
     calculos.detallesXml.forEach(item => {
         const det = detalles.ele('detalle');
@@ -106,7 +100,6 @@ async function facturarInteligente(inputCliente) {
         det.ele('precioUnitario').txt(item.precioUnitario);
         det.ele('descuento').txt(item.descuento);
         det.ele('precioTotalSinImpuestos').txt(item.precioTotalSinImpuesto);
-
         const imps = det.ele('impuestos');
         item.impuestos.forEach(impItem => {
             const imp = imps.ele('impuesto');
@@ -120,33 +113,93 @@ async function facturarInteligente(inputCliente) {
 
     const xmlString = doc.end({ prettyPrint: true });
 
-    // 6. FIRMAR
-    // Nota: En un sistema real, el archivo p12 debería estar en un bucket seguro o desencriptarse temporalmente
-    const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
+    // --- E. FIRMAR XML ---
+    // NOTA: Para producción, el P12 no debería estar en archivo local sino en storage seguro o base64 en BD.
+    // Por ahora leemos del archivo local que subirás.
+    const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12')); 
     const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
 
-    // 7. GUARDAR EN BASE DE DATOS (Antes de enviar al SRI para tener respaldo)
-    const { data: facturaGuardada, error: errorDB } = await supabase
-        .from('facturas')
-        .insert({
-            emisor_id: emisor.id,
-            clave_acceso: claveAcceso,
-            secuencial: secuencialString,
-            total_sin_impuestos: calculos.totales.totalSinImpuestos,
-            total_iva: calculos.totales.totalIva,
-            importe_total: calculos.totales.importeTotal,
-            xml_generado: xmlFirmado,
-            estado_sri: 'FIRMADO'
-        })
-        .select()
-        .single();
+    // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
+    const { data: facturaDB } = await supabase.from('facturas').insert({
+        emisor_id: emisor.id,
+        clave_acceso: claveAcceso,
+        secuencial: secuencialStr,
+        total_sin_impuestos: calculos.totales.totalSinImpuestos,
+        total_iva: calculos.totales.totalIva,
+        importe_total: calculos.totales.importeTotal,
+        xml_generado: xmlFirmado,
+        estado_sri: 'FIRMADO'
+    }).select().single();
 
-    // 8. Retornar datos para que el controlador envíe al SRI
-    return {
-        facturaId: facturaGuardada.id,
-        claveAcceso,
-        xmlFirmado
-    };
+    // --- G. ENVIAR AL SRI ---
+    const urls = emisor.ambiente === 2 ? URLS_SRI.produccion : URLS_SRI.pruebas;
+    const xmlBase64 = Buffer.from(xmlFirmado).toString('base64');
+
+    const soapRecepcion = `
+    <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.recepcion">
+       <soapenv:Header/>
+       <soapenv:Body>
+          <ec:validarComprobante><xml>${xmlBase64}</xml></ec:validarComprobante>
+       </soapenv:Body>
+    </soapenv:Envelope>`;
+
+    try {
+        console.log("Enviando a SRI Recepción...");
+        const { data: dataRecepcion } = await axios.post(urls.recepcion, soapRecepcion, {
+            headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
+        });
+
+        // Parsear respuesta Recepción
+        const jsonRecepcion = parser.parse(dataRecepcion);
+        const respuesta = jsonRecepcion['soap:Envelope']['soap:Body']['ns2:validarComprobanteResponse']['RespuestaRecepcionComprobante'];
+
+        if (respuesta.estado === 'RECIBIDA') {
+            // Actualizar BD a RECIBIDA
+            await supabase.from('facturas').update({ estado_sri: 'RECIBIDA' }).eq('id', facturaDB.id);
+
+            // Pedir Autorización
+            const soapAutorizacion = `
+            <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
+               <soapenv:Header/>
+               <soapenv:Body>
+                  <ec:autorizacionComprobante><claveAccesoComprobante>${claveAcceso}</claveAccesoComprobante></ec:autorizacionComprobante>
+               </soapenv:Body>
+            </soapenv:Envelope>`;
+
+            console.log("Solicitando Autorización...");
+            const { data: dataAuth } = await axios.post(urls.autorizacion, soapAutorizacion, {
+                headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
+            });
+
+            const jsonAuth = parser.parse(dataAuth);
+            const respAuth = jsonAuth['soap:Envelope']['soap:Body']['ns2:autorizacionComprobanteResponse']['RespuestaAutorizacionComprobante'];
+            
+            // Chequear si se autorizó
+            const autorizacion = respAuth.autorizaciones?.autorizacion;
+            const estadoFinal = Array.isArray(autorizacion) ? autorizacion[0].estado : autorizacion?.estado;
+            const xmlAutorizado = Array.isArray(autorizacion) ? autorizacion[0].comprobante : autorizacion?.comprobante;
+
+            // Actualizar BD FINAL
+            await supabase.from('facturas').update({ 
+                estado_sri: estadoFinal,
+                xml_autorizado: xmlAutorizado
+            }).eq('id', facturaDB.id);
+
+            return { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado };
+
+        } else {
+            // Error en Recepción (ej: Clave duplicada)
+            await supabase.from('facturas').update({ 
+                estado_sri: 'DEVUELTA',
+                mensaje_error: JSON.stringify(respuesta.comprobantes)
+            }).eq('id', facturaDB.id);
+            return { exito: false, estado: 'DEVUELTA', error: respuesta };
+        }
+
+    } catch (err) {
+        console.error("Error de Red/SRI", err);
+        return { exito: false, error: err.message };
+    }
 }
 
-module.exports = { facturarInteligente };
+module.exports = { procesarFacturaCompleta };
