@@ -27,15 +27,12 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     sig.signatureAlgorithm = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
     sig.canonicalizationAlgorithm = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
 
-    // 5. Add Reference to Root (empty URI means root document) of signature, but SRI usually wants Reference URI="#comprobante"
-    // We must ensure the root element of 'xml' has id="comprobante" OR we add it.
-    // Assuming xml root is <factura id="comprobante" ...>
-
+    // 5. Add Reference
     sig.addReference(
-        "//*[@id='comprobante']", // XPath to the element to sign
+        "//*[@id='comprobante']",
         [
             "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
-            "http://www.w3.org/TR/2001/REC-xml-c14n-20010315" // Recursive C14N
+            "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
         ],
         "http://www.w3.org/2000/09/xmldsig#sha1"
     );
