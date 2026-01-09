@@ -54,6 +54,9 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
                 .replace(/\n/g, '');
             prefix = prefix ? prefix + ':' : '';
             return `<${prefix}X509Data><${prefix}X509Certificate>${certBody}</${prefix}X509Certificate></${prefix}X509Data>`;
+        },
+        getKey: function (keyInfo) {
+            return keyPem;
         }
     };
 
