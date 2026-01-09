@@ -175,18 +175,22 @@ async function procesarFacturaCompleta(inputCliente) {
         });
 
         if (targetCertBag && targetKeyBag) {
-            console.log("   [FIX] Rebuilding P12 with explicit cert/key...");
-            const newP12 = forge.pkcs12.createPkcs12Asn1({
-                safeContents: [
-                    {
-                        encrypted: false,
-                        safeBags: [targetKeyBag, targetCertBag]
-                    }
-                ],
-                password: password
-            });
-            const newP12Der = forge.asn1.toDer(newP12).getBytes();
+            console.log("   [FIX] Rebuilding P12 with explicit cert/key pair...");
+
+            // Usamos un objeto P12 limpio con la estructura correcta
+            const newP12 = {
+                version: 3,
+                safeContents: [{
+                    encrypted: false,
+                    safeBags: [targetKeyBag, targetCertBag]
+                }]
+            };
+
+            // Convertimos objeto a ASN1 usando la contraseña
+            const newP12Asn1 = forge.pkcs12.toPkcs12Asn1(newP12, password, { algorithm: '3des' });
+            const newP12Der = forge.asn1.toDer(newP12Asn1).getBytes();
             p12BufferToUse = Buffer.from(newP12Der, 'binary');
+            console.log("   [FIX] P12 Rebuilt successfully!");
         } else {
             console.log("   [FIX] Could not isolate cert/key. Using original P12.");
         }
