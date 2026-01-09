@@ -177,30 +177,27 @@ async function procesarFacturaCompleta(inputCliente) {
                     // Drop other certificates
                     return false;
                 }
-                // Keep other types (safeBag, etc)
-                return true;
             });
         });
-
-        if (signingCertFound) {
-            console.log("   [FIX] Re-encoding P12...");
-            const newP12Asn1 = forge.pkcs12.toPkcs12Asn1(p12, password);
-            const newP12Der = forge.asn1.toDer(newP12Asn1).getBytes();
-            p12BufferToUse = Buffer.from(newP12Der, 'binary');
-            console.log("   [FIX] P12 Cleaned successfully!");
-        } else {
-            console.log("   [FIX WARNING] No signing certificate found in P12!");
-            // Fallback to original
-            p12BufferToUse = p12BufferOriginal;
-        }
-
     } catch (e) {
-        console.error("   [FIX ERROR] In-place filtering failed:", e.message);
-        p12BufferToUse = p12BufferOriginal;
+        console.error("   [FIX ERROR] Error al parsear P12 para extracción de certificado:", e.message);
     }
 
-    // Sign with the potentially cleaned P12
-    const xmlFirmado = signInvoiceXml(xmlString, p12BufferToUse, { pkcs12Password: password });
+    let xmlFirmado = '';
+    if (targetCertBag && targetKeyBag) {
+        console.log("   [FIX] Usando Custom Signer con certificado verificado...");
+        try {
+            // Usamos nuestro firmador manual pasando los objetos Forge directos
+            xmlFirmado = signInvoiceXmlCustom(xmlString, targetCertBag, targetKeyBag);
+            console.log("   [FIX] FIRMA CUSTOM GENERADA EXITOSAMENTE!");
+        } catch (errSign) {
+            console.error("   [FIX ERROR] Falló firma custom:", errSign);
+            throw errSign;
+        }
+    } else {
+        console.log("   [FIX WARNING] No se encontró certificado válido. Usando método legacy...");
+        xmlFirmado = signInvoiceXml(xmlString, p12BufferOriginal, { pkcs12Password: password });
+    }
 
     // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
     const { data: facturaDB } = await supabase.from('facturas').insert({
