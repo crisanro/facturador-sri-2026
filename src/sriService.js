@@ -8,6 +8,7 @@ const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
 const { generarClaveAcceso } = require('./utils');
 const { calcularTotalesEImpuestos } = require('./calculadoraSri');
+const { signInvoiceXmlCustom } = require('./signer');
 
 // Iniciar Supabase
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
