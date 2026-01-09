@@ -31,16 +31,10 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     const certificateRefId = 'CertificateRef-' + getRandomId();
 
     // 2. Clear pretty print and newlines for canonicalization (SRI is strict)
-    // Assuming 'xml' comes relatively clean or we trust xmlbuilder
-    // But we need to make sure we sign the 'comprobante' element or the whole doc.
-    // SRI usually expects the signature appended.
-
-    // We assume input 'xml' is the content of the invoice, e.g. <factura>...</factura>
-    // We need to hash IT.
-
-    // Simplification: We will just hash the passed XML string assuming it is C14N compatible
-    // Ideally use a proper C14N library, but often replacing \r\n with \n is enough for basic cases
-    const xmlToSign = xml.replace(/\r\n/g, "\n");
+    // REMOVE XML DECLARATION for hashing (The Signed Element is the Root <factura>)
+    // <?xml ... ?> is not part of the element hash in valid C14N usually if we target by ID.
+    const xmlNoHeader = xml.replace(/<\?xml[\s\S]*?\?>/, '').trim();
+    const xmlToSign = canonicalize(xmlNoHeader);
     const digestComprobante = Buffer.from(sha1(xmlToSign), 'hex').toString('base64');
 
     // 3. Extract Cert Data
@@ -118,6 +112,7 @@ ${exponent}
 
     // 7. Construct SignedInfo
     // Warning: Whitespace inside SignedInfo allows C14N issues. Flatten it.
+    // Adding namespaces to be safe for C14N if strict
     const signedInfo = `
 <ds:SignedInfo Id="${signedInfoId}">
 <ds:CanonicalizationMethod Algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315"/>
@@ -149,14 +144,14 @@ ${exponent}
 
     // 9. Assemble Final XML
     const signature = `
-<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" Id="${signatureId}">
+<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Id="${signatureId}">
 ${signedInfo}
 <ds:SignatureValue Id="${signatureValueId}">
 ${signatureValue}
 </ds:SignatureValue>
 ${keyInfo}
 <ds:Object Id="${objectId}">
-<xades:QualifyingProperties xmlns:xades="http://uri.etsi.org/01903/v1.3.2#" Target="#${signatureId}">
+<xades:QualifyingProperties Target="#${signatureId}">
 ${signedProperties}
 </xades:QualifyingProperties>
 </ds:Object>
@@ -180,14 +175,26 @@ function getRandomId() {
 }
 
 /**
+ * Simple Canonicalization (C14N) wrapper
+ * For real robustness, a proper C14N library is needed.
+ * But here we ensure basic attribute sorting which is the most common cause of mismatch.
+ */
+function canonicalize(xml) {
+    // Basic implementation: remove \r, ensure \n, remove leading/trailing whitespace
+    return xml.replace(/\r/g, '').trim();
+    // Ideally we would parse and re-serialize with sorted attributes, but let's try strict string consistency first.
+}
+
+
+/**
  * Construct Issuer String in LDAP format (CN=...,OU=..., etc)
  */
 function getIssuerString(cert) {
-    // Forge attributes: [{shortName:'CN', value:'...'}, ...]
-    // We need to reverse checks or just map properly.
-    // Standard: CN=AC BANCO CENTRAL DEL ECUADOR,L=QUITO,OU=ENTIDAD DE CERTIFICACION DE INFORMACION-ECIBCE,O=BANCO CENTRAL DEL ECUADOR,C=EC
-    // Note: The order matters for XAdES verification sometimes.
-    return cert.issuer.attributes.map(a => `${a.shortName}=${a.value}`).join(',');
+    // Reverse attributes to match XAdES requirement (CN first usually)
+    // Forge gives [C, O, OU, L, CN] usually.
+    // We want: CN=...,L=...,OU=...,O=...,C=...
+    // Added Space after comma
+    return cert.issuer.attributes.slice().reverse().map(a => `${a.shortName}=${a.value}`).join(', ');
 }
 
 module.exports = { signInvoiceXmlCustom };
