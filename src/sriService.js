@@ -187,6 +187,7 @@ async function procesarFacturaCompleta(inputCliente) {
             // Usamos nuestro firmador manual pasando los objetos Forge directos
             xmlFirmado = signInvoiceXmlCustom(xmlString, targetCertBag, targetKeyBag);
             console.log("   [FIX] FIRMA CUSTOM GENERADA EXITOSAMENTE!");
+            console.log("   [DEBUG XML TAIL] ... " + xmlFirmado.slice(-500)); // Ver cómo cierra
         } catch (errSign) {
             console.error("   [FIX ERROR] Falló firma custom:", errSign);
             throw errSign;
