@@ -145,40 +145,36 @@ async function procesarFacturaCompleta(inputCliente) {
     let p12BufferToUse = p12BufferOriginal;
     const password = emisor.firma_password;
 
+    let targetCertBag = null;
+    let targetKeyBag = null;
+
     try {
         const p12Asn1 = forge.asn1.fromDer(p12BufferOriginal.toString('binary'));
         const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
-
-        // 2. Filter IN-PLACE to remove bad certificates
-        // This avoids creating new P12 objects from scratch which causes 'Invalid PEM' errors
         const safes = p12.safeContent || p12.safeContents;
-        p12.safeContents = safes; // Ensure plural for toPkcs12Asn1 usage
 
-        console.log("   [FIX] Filtering P12 in-place...");
-        let signingCertFound = false;
+        console.log("   [FIX] Buscando certificado y llave manual...");
 
         safes.forEach(sc => {
-            sc.safeBags = sc.safeBags.filter(sb => {
-                // Always keep keys
-                if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
-                    return true;
-                }
-                // Filter Certificates
+            sc.safeBags.forEach(sb => {
+                // 1. Is Certificate?
                 if (sb.type === forge.pki.oids.certBag) {
                     const cert = sb.cert || (sb.attributes && sb.attributes.cert);
                     if (cert) {
                         const ku = cert.getExtension('keyUsage');
                         if (ku && ku.digitalSignature) {
-                            console.log("   [FIX] Keeping Signing Cert:", cert.subject.getField('CN').value);
-                            signingCertFound = true;
-                            return true;
+                            console.log("   [FIX] Certificado de firma encontrado:", cert.subject.getField('CN').value);
+                            targetCertBag = sb;
                         }
                     }
-                    // Drop other certificates
-                    return false;
+                }
+                // 2. Is Private Key?
+                else if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
+                    targetKeyBag = sb;
                 }
             });
         });
+
     } catch (e) {
         console.error("   [FIX ERROR] Error al parsear P12 para extracción de certificado:", e.message);
     }
