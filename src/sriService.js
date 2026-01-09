@@ -121,7 +121,7 @@ async function procesarFacturaCompleta(inputCliente) {
         det.ele('cantidad').txt(item.cantidad);
         det.ele('precioUnitario').txt(item.precioUnitario);
         det.ele('descuento').txt(item.descuento);
-        det.ele('precioTotalSinImpuestos').txt(item.precioTotalSinImpuesto);
+        det.ele('precioTotalSinImpuesto').txt(item.precioTotalSinImpuesto);
         const imps = det.ele('impuestos');
         item.impuestos.forEach(impItem => {
             const imp = imps.ele('impuesto');
