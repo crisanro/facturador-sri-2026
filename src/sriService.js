@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const forge = require('node-forge'); // Debuging P12
 const { create } = require('xmlbuilder2');
 const { signInvoiceXml } = require('ec-sri-invoice-signer');
 const fs = require('fs');
@@ -139,6 +140,28 @@ async function procesarFacturaCompleta(inputCliente) {
     // NOTA: Para producción, el P12 no debería estar en archivo local sino en storage seguro o base64 en BD.
     // Por ahora leemos del archivo local que subirás.
     const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
+
+    // --- DEBUG P12 START ---
+    try {
+        console.log("--- INSPECCIONANDO P12 ---");
+        const p12Asn1 = forge.asn1.fromDer(p12Buffer.toString('binary'));
+        const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, emisor.firma_password);
+        let certCount = 0;
+        p12.safeContent.forEach(sc => {
+            sc.safeBags.forEach(sb => {
+                if (sb.certId) {
+                    certCount++;
+                    const cert = sb.cert;
+                    console.log(`Cert #${certCount}: Subject=${cert.subject.getField('CN').value}`);
+                    const ku = cert.getExtension('keyUsage');
+                    console.log(`   KeyUsage: ${ku ? (ku.digitalSignature ? 'DigitalSig' : '') + ' ' + (ku.nonRepudiation ? 'NonRep' : '') : 'NONE'}`);
+                }
+            });
+        });
+        console.log("--- FIN INSPECCION ---");
+    } catch (e) { console.log("Error inspeccionando P12:", e.message); }
+    // --- DEBUG P12 END ---
+
     const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
 
     // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
