@@ -25,6 +25,7 @@ const URLS_SRI = {
 
 async function procesarFacturaCompleta(inputCliente) {
     console.log("1. Iniciando proceso para:", inputCliente.rucEmisor);
+    console.log("   Datos recibidos:", JSON.stringify(inputCliente).substring(0, 100)); // Log breve
 
     // --- A. BUSCAR EMISOR EN BD ---
     const { data: emisor, error } = await supabase
@@ -206,7 +207,9 @@ async function procesarFacturaCompleta(inputCliente) {
                 xml_autorizado: xmlAutorizado
             }).eq('id', facturaDB.id);
 
-            return { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado };
+            const resultadoExito = { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado };
+            console.log("RETORNANDO EXITO:", resultadoExito.estado);
+            return resultadoExito;
 
         } else {
             // Error en Recepción (ej: Clave duplicada)
@@ -214,10 +217,12 @@ async function procesarFacturaCompleta(inputCliente) {
                 estado_sri: 'DEVUELTA',
                 mensaje_error: JSON.stringify(respuesta.comprobantes)
             }).eq('id', facturaDB.id);
+            console.log("RETORNANDO ERROR RECEPCION");
             return { exito: false, estado: 'DEVUELTA', error: respuesta };
         }
 
     } catch (err) {
+        console.error("Error de Red/SRI", err);
         console.error("Error de Red/SRI", err);
         return { exito: false, error: err.message };
     }
