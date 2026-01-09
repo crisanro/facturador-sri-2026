@@ -17,11 +17,16 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     // Private Key strictly in PKCS8 PEM format often works best, or standard PEM
     const keyPem = forge.pki.privateKeyToPem(privateKey);
 
+    console.log("   [DEBUG SIGNER] Cert PEM length:", certPem.length);
+    console.log("   [DEBUG SIGNER] Key PEM length:", keyPem ? keyPem.length : "NULL");
+    if (keyPem) console.log("   [DEBUG SIGNER] Key PEM Header:", keyPem.substring(0, 40));
+
     // 2. Setup xml-crypto SignedXml
     const sig = new SignedXml();
 
     // 3. Configure Signing Key
     sig.signingKey = keyPem;
+    console.log("   [DEBUG SIGNER] sig.signingKey set. Length:", sig.signingKey ? sig.signingKey.length : "NULL");
 
     // 4. Configure Algorithms (SRI needs SHA1)
     sig.signatureAlgorithm = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
