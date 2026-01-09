@@ -1,5 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
-const forge = require('node-forge'); // Debuging P12
+const forge = require('node-forge');
 const { create } = require('xmlbuilder2');
 const { signInvoiceXml } = require('ec-sri-invoice-signer');
 const fs = require('fs');
@@ -139,41 +139,65 @@ async function procesarFacturaCompleta(inputCliente) {
     // --- E. FIRMAR XML ---
     // NOTA: Para producción, el P12 no debería estar en archivo local sino en storage seguro o base64 en BD.
     // Por ahora leemos del archivo local que subirás.
-    const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
+    // --- FILTER P12 (FIX FIRMA INVALIDA) ---
+    // Extract ONLY the certificate with 'Digital Signature' capability
+    const p12BufferOriginal = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
+    let p12BufferToUse = p12BufferOriginal;
+    const password = emisor.firma_password;
 
-    // --- DEBUG P12 START ---
     try {
-        console.log("--- INSPECCIONANDO P12 ---");
-        const p12Asn1 = forge.asn1.fromDer(p12Buffer.toString('binary'));
-        const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, emisor.firma_password);
-        console.log("P12 Object Keys:", Object.keys(p12));
-        if (p12.safeContents) console.log("Found safeContents (plural)");
+        const p12Asn1 = forge.asn1.fromDer(p12BufferOriginal.toString('binary'));
+        const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
 
-        let certCount = 0;
-        const safes = p12.safeContent || p12.safeContents; // Fallback
+        // Rebuild clean P12
+        let targetCertBag = null;
+        let targetKeyBag = null;
 
-        if (!safes) {
-            console.log("NO SAFE CONTENT FOUND!");
-        } else {
-            safes.forEach(sc => {
-                sc.safeBags.forEach(sb => {
-                    if (sb.certId) {
-                        certCount++;
-                        const cert = sb.cert;
-                        console.log(`Cert #${certCount}: Subject=${cert.subject.getField('CN').value}`);
+        const safes = p12.safeContent || p12.safeContents;
+        safes.forEach(sc => {
+            sc.safeBags.forEach(sb => {
+                // 1. Is Certificate?
+                if (sb.type === forge.pki.oids.certBag) {
+                    const cert = sb.cert || (sb.attributes && sb.attributes.cert);
+                    if (cert) {
                         const ku = cert.getExtension('keyUsage');
-                        console.log(`   KeyUsage: ${ku ? (ku.digitalSignature ? 'DigitalSig' : '') + ' ' + (ku.nonRepudiation ? 'NonRep' : '') : 'NONE'}`);
+                        if (ku && ku.digitalSignature) {
+                            console.log("   [FIX] Signing Cert Found:", cert.subject.getField('CN').value);
+                            targetCertBag = sb;
+                        }
                     }
-                });
+                }
+                // 2. Is Private Key?
+                else if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
+                    targetKeyBag = sb;
+                }
             });
-            console.log("--- FIN INSPECCION ---");
-        }
-    } catch (e) {
-        console.log("Error inspeccionando P12:", e.message);
-    }
-    // --- DEBUG P12 END ---
+        });
 
-    const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
+        if (targetCertBag && targetKeyBag) {
+            console.log("   [FIX] Rebuilding P12 with explicit cert/key...");
+            const newP12 = forge.pkcs12.createPkcs12Asn1({
+                safeContents: [
+                    {
+                        encrypted: false,
+                        safeBags: [targetKeyBag, targetCertBag]
+                    }
+                ],
+                password: password
+            });
+            const newP12Der = forge.asn1.toDer(newP12).getBytes();
+            p12BufferToUse = Buffer.from(newP12Der, 'binary');
+        } else {
+            console.log("   [FIX] Could not isolate cert/key. Using original P12.");
+        }
+
+    } catch (e) {
+        console.error("   [FIX ERROR] P12 filtering failed:", e.message);
+        p12BufferToUse = p12BufferOriginal;
+    }
+
+    // Sign with the potentially cleaned P12
+    const xmlFirmado = signInvoiceXml(xmlString, p12BufferToUse, { pkcs12Password: password });
 
     // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
     const { data: facturaDB } = await supabase.from('facturas').insert({
