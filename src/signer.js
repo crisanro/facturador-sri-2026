@@ -164,11 +164,13 @@ ${signedProperties}
 `.replace(/\n/g, '');
 
     // Inject into original XML (before closing tag, assuming root is </factura>)
-    // return xml.replace('</factura>', signature + '</factura>');
-    return xml + signature; // Often better to just append if root is separate, BUT SRI expects signature INSIDE root.
-    // The input XML usually ends with </factura>. We slice it.
+    // SRI expects signature INSIDE root element (Enveloped Signature)
+
     const closeTagIndex = xml.lastIndexOf('</');
-    if (closeTagIndex === -1) return xml + signature; // Fallback
+    if (closeTagIndex === -1) {
+        // Fallback: just append if we can't find closing tag
+        return xml + signature;
+    }
 
     return xml.substring(0, closeTagIndex) + signature + xml.substring(closeTagIndex);
 }
