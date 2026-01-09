@@ -133,7 +133,7 @@ async function procesarFacturaCompleta(inputCliente) {
         });
     });
 
-    const xmlString = doc.end({ prettyPrint: true });
+    const xmlString = doc.end({ prettyPrint: false });
 
     // --- E. FIRMAR XML ---
     // NOTA: Para producción, el P12 no debería estar en archivo local sino en storage seguro o base64 en BD.
