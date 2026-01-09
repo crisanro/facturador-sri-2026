@@ -198,16 +198,22 @@ async function procesarFacturaCompleta(inputCliente) {
 
             // Chequear si se autorizó
             const autorizacion = respAuth.autorizaciones?.autorizacion;
-            const estadoFinal = Array.isArray(autorizacion) ? autorizacion[0].estado : autorizacion?.estado;
-            const xmlAutorizado = Array.isArray(autorizacion) ? autorizacion[0].comprobante : autorizacion?.comprobante;
+            const objAuth = Array.isArray(autorizacion) ? autorizacion[0] : autorizacion; // Manejar si es array u objeto
+
+            const estadoFinal = objAuth?.estado || 'DESCONOCIDO';
+            const xmlAutorizado = objAuth?.comprobante;
+            const mensajes = objAuth?.mensajes; // Capturar mensajes de error/advertencia
 
             // Actualizar BD FINAL
             await supabase.from('facturas').update({
                 estado_sri: estadoFinal,
-                xml_autorizado: xmlAutorizado
+                xml_autorizado: xmlAutorizado,
+                mensaje_error: mensajes ? JSON.stringify(mensajes) : null // Guardar error en BD si existe
             }).eq('id', facturaDB.id);
 
-            const resultadoExito = { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado };
+            const resultadoExito = { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado, mensajes };
+
+
             console.log("RETORNANDO EXITO:", resultadoExito.estado);
             return resultadoExito;
 
