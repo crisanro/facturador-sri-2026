@@ -146,41 +146,49 @@ async function procesarFacturaCompleta(inputCliente) {
         console.log("--- INSPECCIONANDO P12 ---");
         const p12Asn1 = forge.asn1.fromDer(p12Buffer.toString('binary'));
         const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, emisor.firma_password);
+        console.log("P12 Object Keys:", Object.keys(p12));
+        if (p12.safeContents) console.log("Found safeContents (plural)");
+
         let certCount = 0;
-        p12.safeContent.forEach(sc => {
-            sc.safeBags.forEach(sb => {
-                if (sb.certId) {
-                    certCount++;
-                    const cert = sb.cert;
-                    console.log(`Cert #${certCount}: Subject=${cert.subject.getField('CN').value}`);
-                    const ku = cert.getExtension('keyUsage');
-                    console.log(`   KeyUsage: ${ku ? (ku.digitalSignature ? 'DigitalSig' : '') + ' ' + (ku.nonRepudiation ? 'NonRep' : '') : 'NONE'}`);
-                }
+        const safes = p12.safeContent || p12.safeContents; // Fallback
+
+        if (!safes) {
+            console.log("NO SAFE CONTENT FOUND!");
+        } else {
+            safes.forEach(sc => {
+                sc.safeBags.forEach(sb => {
+                    if (sb.certId) {
+                        certCount++;
+                        const cert = sb.cert;
+                        console.log(`Cert #${certCount}: Subject=${cert.subject.getField('CN').value}`);
+                        const ku = cert.getExtension('keyUsage');
+                        console.log(`   KeyUsage: ${ku ? (ku.digitalSignature ? 'DigitalSig' : '') + ' ' + (ku.nonRepudiation ? 'NonRep' : '') : 'NONE'}`);
+                    }
+                });
             });
-        });
-        console.log("--- FIN INSPECCION ---");
-    } catch (e) { console.log("Error inspeccionando P12:", e.message); }
-    // --- DEBUG P12 END ---
+            console.log("--- FIN INSPECCION ---");
+        } catch (e) { console.log("Error inspeccionando P12:", e.message); }
+        // --- DEBUG P12 END ---
 
-    const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
+        const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
 
-    // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
-    const { data: facturaDB } = await supabase.from('facturas').insert({
-        emisor_id: emisor.id,
-        clave_acceso: claveAcceso,
-        secuencial: secuencialStr,
-        total_sin_impuestos: calculos.totales.totalSinImpuestos,
-        total_iva: calculos.totales.totalIva,
-        importe_total: calculos.totales.importeTotal,
-        xml_generado: xmlFirmado,
-        estado_sri: 'FIRMADO'
-    }).select().single();
+        // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
+        const { data: facturaDB } = await supabase.from('facturas').insert({
+            emisor_id: emisor.id,
+            clave_acceso: claveAcceso,
+            secuencial: secuencialStr,
+            total_sin_impuestos: calculos.totales.totalSinImpuestos,
+            total_iva: calculos.totales.totalIva,
+            importe_total: calculos.totales.importeTotal,
+            xml_generado: xmlFirmado,
+            estado_sri: 'FIRMADO'
+        }).select().single();
 
-    // --- G. ENVIAR AL SRI ---
-    const urls = emisor.ambiente === 2 ? URLS_SRI.produccion : URLS_SRI.pruebas;
-    const xmlBase64 = Buffer.from(xmlFirmado).toString('base64');
+        // --- G. ENVIAR AL SRI ---
+        const urls = emisor.ambiente === 2 ? URLS_SRI.produccion : URLS_SRI.pruebas;
+        const xmlBase64 = Buffer.from(xmlFirmado).toString('base64');
 
-    const soapRecepcion = `
+        const soapRecepcion = `
     <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.recepcion">
        <soapenv:Header/>
        <soapenv:Body>
@@ -188,22 +196,22 @@ async function procesarFacturaCompleta(inputCliente) {
        </soapenv:Body>
     </soapenv:Envelope>`;
 
-    try {
-        console.log("Enviando a SRI Recepción...");
-        const { data: dataRecepcion } = await axios.post(urls.recepcion, soapRecepcion, {
-            headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
-        });
+        try {
+            console.log("Enviando a SRI Recepción...");
+            const { data: dataRecepcion } = await axios.post(urls.recepcion, soapRecepcion, {
+                headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
+            });
 
-        // Parsear respuesta Recepción
-        const jsonRecepcion = parser.parse(dataRecepcion);
-        const respuesta = jsonRecepcion['soap:Envelope']['soap:Body']['ns2:validarComprobanteResponse']['RespuestaRecepcionComprobante'];
+            // Parsear respuesta Recepción
+            const jsonRecepcion = parser.parse(dataRecepcion);
+            const respuesta = jsonRecepcion['soap:Envelope']['soap:Body']['ns2:validarComprobanteResponse']['RespuestaRecepcionComprobante'];
 
-        if (respuesta.estado === 'RECIBIDA') {
-            // Actualizar BD a RECIBIDA
-            await supabase.from('facturas').update({ estado_sri: 'RECIBIDA' }).eq('id', facturaDB.id);
+            if (respuesta.estado === 'RECIBIDA') {
+                // Actualizar BD a RECIBIDA
+                await supabase.from('facturas').update({ estado_sri: 'RECIBIDA' }).eq('id', facturaDB.id);
 
-            // Pedir Autorización
-            const soapAutorizacion = `
+                // Pedir Autorización
+                const soapAutorizacion = `
             <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
                <soapenv:Header/>
                <soapenv:Body>
@@ -211,50 +219,50 @@ async function procesarFacturaCompleta(inputCliente) {
                </soapenv:Body>
             </soapenv:Envelope>`;
 
-            console.log("Solicitando Autorización...");
-            const { data: dataAuth } = await axios.post(urls.autorizacion, soapAutorizacion, {
-                headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
-            });
+                console.log("Solicitando Autorización...");
+                const { data: dataAuth } = await axios.post(urls.autorizacion, soapAutorizacion, {
+                    headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
+                });
 
-            const jsonAuth = parser.parse(dataAuth);
-            const respAuth = jsonAuth['soap:Envelope']['soap:Body']['ns2:autorizacionComprobanteResponse']['RespuestaAutorizacionComprobante'];
+                const jsonAuth = parser.parse(dataAuth);
+                const respAuth = jsonAuth['soap:Envelope']['soap:Body']['ns2:autorizacionComprobanteResponse']['RespuestaAutorizacionComprobante'];
 
-            // Chequear si se autorizó
-            const autorizacion = respAuth.autorizaciones?.autorizacion;
-            const objAuth = Array.isArray(autorizacion) ? autorizacion[0] : autorizacion; // Manejar si es array u objeto
+                // Chequear si se autorizó
+                const autorizacion = respAuth.autorizaciones?.autorizacion;
+                const objAuth = Array.isArray(autorizacion) ? autorizacion[0] : autorizacion; // Manejar si es array u objeto
 
-            const estadoFinal = objAuth?.estado || 'DESCONOCIDO';
-            const xmlAutorizado = objAuth?.comprobante;
-            const mensajes = objAuth?.mensajes; // Capturar mensajes de error/advertencia
+                const estadoFinal = objAuth?.estado || 'DESCONOCIDO';
+                const xmlAutorizado = objAuth?.comprobante;
+                const mensajes = objAuth?.mensajes; // Capturar mensajes de error/advertencia
 
-            // Actualizar BD FINAL
-            await supabase.from('facturas').update({
-                estado_sri: estadoFinal,
-                xml_autorizado: xmlAutorizado,
-                mensaje_error: mensajes ? JSON.stringify(mensajes) : null // Guardar error en BD si existe
-            }).eq('id', facturaDB.id);
+                // Actualizar BD FINAL
+                await supabase.from('facturas').update({
+                    estado_sri: estadoFinal,
+                    xml_autorizado: xmlAutorizado,
+                    mensaje_error: mensajes ? JSON.stringify(mensajes) : null // Guardar error en BD si existe
+                }).eq('id', facturaDB.id);
 
-            const resultadoExito = { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado, mensajes };
+                const resultadoExito = { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado, mensajes };
 
 
-            console.log("RETORNANDO EXITO:", resultadoExito.estado);
-            return resultadoExito;
+                console.log("RETORNANDO EXITO:", resultadoExito.estado);
+                return resultadoExito;
 
-        } else {
-            // Error en Recepción (ej: Clave duplicada)
-            await supabase.from('facturas').update({
-                estado_sri: 'DEVUELTA',
-                mensaje_error: JSON.stringify(respuesta.comprobantes)
-            }).eq('id', facturaDB.id);
-            console.log("RETORNANDO ERROR RECEPCION");
-            return { exito: false, estado: 'DEVUELTA', error: respuesta };
+            } else {
+                // Error en Recepción (ej: Clave duplicada)
+                await supabase.from('facturas').update({
+                    estado_sri: 'DEVUELTA',
+                    mensaje_error: JSON.stringify(respuesta.comprobantes)
+                }).eq('id', facturaDB.id);
+                console.log("RETORNANDO ERROR RECEPCION");
+                return { exito: false, estado: 'DEVUELTA', error: respuesta };
+            }
+
+        } catch (err) {
+            console.error("Error de Red/SRI", err);
+            console.error("Error de Red/SRI", err);
+            return { exito: false, error: err.message };
         }
-
-    } catch (err) {
-        console.error("Error de Red/SRI", err);
-        console.error("Error de Red/SRI", err);
-        return { exito: false, error: err.message };
     }
-}
 
 module.exports = { procesarFacturaCompleta };
