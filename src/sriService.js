@@ -149,54 +149,53 @@ async function procesarFacturaCompleta(inputCliente) {
         const p12Asn1 = forge.asn1.fromDer(p12BufferOriginal.toString('binary'));
         const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
 
-        // Rebuild clean P12
-        let targetCertBag = null;
-        let targetKeyBag = null;
-
+        // 2. Filter IN-PLACE to remove bad certificates
+        // This avoids creating new P12 objects from scratch which causes 'Invalid PEM' errors
         const safes = p12.safeContent || p12.safeContents;
+        p12.safeContents = safes; // Ensure plural for toPkcs12Asn1 usage
+
+        console.log("   [FIX] Filtering P12 in-place...");
+        let signingCertFound = false;
+
         safes.forEach(sc => {
-            sc.safeBags.forEach(sb => {
-                // 1. Is Certificate?
+            sc.safeBags = sc.safeBags.filter(sb => {
+                // Always keep keys
+                if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
+                    return true;
+                }
+                // Filter Certificates
                 if (sb.type === forge.pki.oids.certBag) {
                     const cert = sb.cert || (sb.attributes && sb.attributes.cert);
                     if (cert) {
                         const ku = cert.getExtension('keyUsage');
                         if (ku && ku.digitalSignature) {
-                            console.log("   [FIX] Signing Cert Found:", cert.subject.getField('CN').value);
-                            targetCertBag = sb;
+                            console.log("   [FIX] Keeping Signing Cert:", cert.subject.getField('CN').value);
+                            signingCertFound = true;
+                            return true;
                         }
                     }
+                    // Drop other certificates
+                    return false;
                 }
-                // 2. Is Private Key?
-                else if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
-                    targetKeyBag = sb;
-                }
+                // Keep other types (safeBag, etc)
+                return true;
             });
         });
 
-        if (targetCertBag && targetKeyBag) {
-            console.log("   [FIX] Rebuilding P12 with explicit cert/key pair...");
-
-            // Usamos un objeto P12 limpio con la estructura correcta
-            const newP12 = {
-                version: 3,
-                safeContents: [{
-                    encrypted: false,
-                    safeBags: [targetKeyBag, targetCertBag]
-                }]
-            };
-
-            // Convertimos objeto a ASN1 usando la contraseña
-            const newP12Asn1 = forge.pkcs12.toPkcs12Asn1(newP12, password, { algorithm: '3des' });
+        if (signingCertFound) {
+            console.log("   [FIX] Re-encoding P12...");
+            const newP12Asn1 = forge.pkcs12.toPkcs12Asn1(p12, password);
             const newP12Der = forge.asn1.toDer(newP12Asn1).getBytes();
             p12BufferToUse = Buffer.from(newP12Der, 'binary');
-            console.log("   [FIX] P12 Rebuilt successfully!");
+            console.log("   [FIX] P12 Cleaned successfully!");
         } else {
-            console.log("   [FIX] Could not isolate cert/key. Using original P12.");
+            console.log("   [FIX WARNING] No signing certificate found in P12!");
+            // Fallback to original
+            p12BufferToUse = p12BufferOriginal;
         }
 
     } catch (e) {
-        console.error("   [FIX ERROR] P12 filtering failed:", e.message);
+        console.error("   [FIX ERROR] In-place filtering failed:", e.message);
         p12BufferToUse = p12BufferOriginal;
     }
 
