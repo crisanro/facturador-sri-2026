@@ -32,8 +32,8 @@ async function procesarFacturaCompleta(inputCliente) {
         .select('*')
         .eq('ruc', inputCliente.rucEmisor)
         .single();
-        
-    if(error || !emisor) throw new Error("Emisor no encontrado en Supabase. ¿Ya lo registraste?");
+
+    if (error || !emisor) throw new Error("Emisor no encontrado en Supabase. ¿Ya lo registraste?");
 
     // --- B. SECUENCIAL ---
     const nuevoSecuencial = emisor.secuencial_actual + 1;
@@ -49,7 +49,7 @@ async function procesarFacturaCompleta(inputCliente) {
     const claveAcceso = generarClaveAcceso(hoy, '01', emisor.ruc, emisor.ambiente.toString(), '001001', secuencialStr);
 
     const doc = create({ version: '1.0', encoding: 'UTF-8' }).ele('factura', { id: 'comprobante', version: '1.1.0' });
-    
+
     // Info Tributaria
     const infoTrib = doc.ele('infoTributaria');
     infoTrib.ele('ambiente').txt(emisor.ambiente);
@@ -59,9 +59,17 @@ async function procesarFacturaCompleta(inputCliente) {
     infoTrib.ele('claveAcceso').txt(claveAcceso);
     infoTrib.ele('codDoc').txt('01');
     infoTrib.ele('estab').txt('001'); // Podrías parametrizar esto en la BD también
-    infoTrib.ele('ptoEmi').txt('001'); 
+    infoTrib.ele('ptoEmi').txt('001');
     infoTrib.ele('secuencial').txt(secuencialStr);
     infoTrib.ele('dirMatriz').txt(emisor.direccion_matriz);
+
+    // --- NUEVO: RIMPE y Agente de Retención ---
+    if (emisor.contribuyente_rimpe) {
+        infoTrib.ele('contribuyenteRimpe').txt(emisor.contribuyente_rimpe);
+    }
+    if (emisor.agente_retencion) {
+        infoTrib.ele('agenteRetencion').txt(emisor.agente_retencion);
+    }
 
     // Info Factura
     const infoFac = doc.ele('infoFactura');
@@ -73,7 +81,7 @@ async function procesarFacturaCompleta(inputCliente) {
     infoFac.ele('identificacionComprador').txt(inputCliente.cliente.identificacion);
     infoFac.ele('totalSinImpuestos').txt(calculos.totales.totalSinImpuestos);
     infoFac.ele('totalDescuento').txt(calculos.totales.totalDescuento);
-    
+
     const totalConImpuestosXml = infoFac.ele('totalConImpuestos');
     calculos.totalConImpuestosXml.forEach(imp => {
         const i = totalConImpuestosXml.ele('totalImpuesto');
@@ -86,9 +94,22 @@ async function procesarFacturaCompleta(inputCliente) {
     infoFac.ele('propina').txt('0.00');
     infoFac.ele('importeTotal').txt(calculos.totales.importeTotal);
     infoFac.ele('moneda').txt('DOLAR');
-    
+
     const pagos = infoFac.ele('pagos');
-    pagos.ele('pago').ele('formaPago').txt('20').up().ele('total').txt(calculos.totales.importeTotal);
+
+    // --- NUEVO: Formas de Pago Dinámicas ---
+    if (inputCliente.pagos && Array.isArray(inputCliente.pagos) && inputCliente.pagos.length > 0) {
+        inputCliente.pagos.forEach(pagoItem => {
+            const p = pagos.ele('pago');
+            p.ele('formaPago').txt(pagoItem.formaPago);
+            p.ele('total').txt(pagoItem.total.toFixed(2));
+            if (pagoItem.plazo) p.ele('plazo').txt(pagoItem.plazo);
+            if (pagoItem.unidadTiempo) p.ele('unidadTiempo').txt(pagoItem.unidadTiempo);
+        });
+    } else {
+        // Fallback por defecto: Código 20 (Otros con utilización del sistema financiero)
+        pagos.ele('pago').ele('formaPago').txt('20').up().ele('total').txt(calculos.totales.importeTotal);
+    }
 
     // Detalles
     const detalles = doc.ele('detalles');
@@ -116,7 +137,7 @@ async function procesarFacturaCompleta(inputCliente) {
     // --- E. FIRMAR XML ---
     // NOTA: Para producción, el P12 no debería estar en archivo local sino en storage seguro o base64 en BD.
     // Por ahora leemos del archivo local que subirás.
-    const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12')); 
+    const p12Buffer = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
     const xmlFirmado = signInvoiceXml(xmlString, p12Buffer, { pkcs12Password: emisor.firma_password });
 
     // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
@@ -173,14 +194,14 @@ async function procesarFacturaCompleta(inputCliente) {
 
             const jsonAuth = parser.parse(dataAuth);
             const respAuth = jsonAuth['soap:Envelope']['soap:Body']['ns2:autorizacionComprobanteResponse']['RespuestaAutorizacionComprobante'];
-            
+
             // Chequear si se autorizó
             const autorizacion = respAuth.autorizaciones?.autorizacion;
             const estadoFinal = Array.isArray(autorizacion) ? autorizacion[0].estado : autorizacion?.estado;
             const xmlAutorizado = Array.isArray(autorizacion) ? autorizacion[0].comprobante : autorizacion?.comprobante;
 
             // Actualizar BD FINAL
-            await supabase.from('facturas').update({ 
+            await supabase.from('facturas').update({
                 estado_sri: estadoFinal,
                 xml_autorizado: xmlAutorizado
             }).eq('id', facturaDB.id);
@@ -189,7 +210,7 @@ async function procesarFacturaCompleta(inputCliente) {
 
         } else {
             // Error en Recepción (ej: Clave duplicada)
-            await supabase.from('facturas').update({ 
+            await supabase.from('facturas').update({
                 estado_sri: 'DEVUELTA',
                 mensaje_error: JSON.stringify(respuesta.comprobantes)
             }).eq('id', facturaDB.id);

@@ -1,43 +1,39 @@
 const express = require('express');
-const cors = require('cors'); // Asegúrate de haber instalado cors
 const { procesarFacturaCompleta } = require('./sriService');
-require('dotenv').config(); // Cargar variables de entorno locales si existen
-
 const app = express();
-app.use(cors());
+
 app.use(express.json());
 
-// Endpoint único y potente
-app.post('/api/facturar', async (req, res) => {
+app.post('/api/facturar', async (req, res) => { // Nota el async
     try {
-        console.log("--> Nueva solicitud de facturación recibida");
-        
-        // Ejecutamos toda la lógica encapsulada
-        const resultado = await procesarFacturaCompleta(req.body);
+        console.log("Recibiendo solicitud de facturación...");
+        const datosFactura = req.body;
 
-        if (resultado.exito && resultado.estado === 'AUTORIZADO') {
-            res.status(200).json({
+        // Llamada asíncrona que hace TODO
+        const resultado = await procesarFacturaCompleta(datosFactura);
+
+        if (resultado.resultadoSRI.exito) {
+            res.json({
                 ok: true,
-                mensaje: "Factura Autorizada Exitosamente",
-                datos: resultado
+                mensaje: "Factura Autorizada por el SRI",
+                claveAcceso: resultado.claveAcceso,
+                sriResponse: resultado.resultadoSRI.detalle
             });
         } else {
+            // El SRI la rechazó o hubo error de conexión
             res.status(400).json({
                 ok: false,
-                mensaje: "La factura no fue autorizada",
-                detalle: resultado
+                mensaje: "Error en proceso SRI",
+                etapa: resultado.resultadoSRI.etapa,
+                errores: resultado.resultadoSRI.detalle
             });
         }
 
     } catch (error) {
-        console.error("Error crítico:", error);
-        res.status(500).json({ 
-            ok: false, 
-            mensaje: "Error interno del servidor", 
-            error: error.message 
-        });
+        console.error(error);
+        res.status(500).json({ ok: false, error: error.message });
     }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Facturador Inteligente listo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Facturador SRI listo en puerto ${PORT}`));
