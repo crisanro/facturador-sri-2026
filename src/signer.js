@@ -28,14 +28,14 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     sig.canonicalizationAlgorithm = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315";
 
     // 5. Add Reference
-    sig.addReference(
-        "//*[@id='comprobante']",
-        [
+    sig.addReference({
+        xpath: "//*[@id='comprobante']",
+        transforms: [
             "http://www.w3.org/2000/09/xmldsig#enveloped-signature",
             "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"
         ],
-        "http://www.w3.org/2000/09/xmldsig#sha1"
-    );
+        digestAlgorithm: "http://www.w3.org/2000/09/xmldsig#sha1"
+    });
 
     // 6. Add KeyInfo (X509Certificate)
     // xml-crypto usually adds KeyInfo automatically if provided? No, usually manual or via getKeyInfoContent
