@@ -49,17 +49,8 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     // 7. Compute Signature
     sig.computeSignature(xml);
 
-    // 8. Get Signed XML and append KeyInfo manually since we removed provider
+    // 8. Get Signed XML and append KeyInfo manually
     let signedXml = sig.getSignedXml();
-
-    // Manual KeyInfo Construction (Standard XAdES-BES)
-    // We append this into the ds:Signature object if possible found in signedXml
-    // But getSignedXml() returns the whole document? No, it returns the Signed Signature usually? 
-    // Wait, getSignedXml() returns the *original XML* with the signature injected.
-
-    // We need to inject <ds:KeyInfo> inside <ds:Signature>
-    // The signature block looks like <ds:Signature ...> <ds:SignedInfo>...</ds:SignedInfo> <ds:SignatureValue>...</ds:SignatureValue> </ds:Signature>
-    // We want to insert KeyInfo after SignatureValue.
 
     const certBody = certPem.replace(/-----BEGIN CERTIFICATE-----/g, '')
         .replace(/-----END CERTIFICATE-----/g, '')
@@ -69,27 +60,32 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     const modulus = Buffer.from(privateKey.n.toString(16), 'hex').toString('base64');
     const exponent = Buffer.from(privateKey.e.toString(16), 'hex').toString('base64');
 
-    const keyInfoXml = `
-<ds:KeyInfo>
-<ds:X509Data>
-<ds:X509Certificate>
-${certBody}
-</ds:X509Certificate>
-</ds:X509Data>
-<ds:KeyValue>
-<ds:RSAKeyValue>
-<ds:Modulus>
-${modulus}
-</ds:Modulus>
-<ds:Exponent>
-${exponent}
-</ds:Exponent>
-</ds:RSAKeyValue>
-</ds:KeyValue>
-</ds:KeyInfo>`.replace(/\n/g, '');
+    // Detect prefix used by xml-crypto (usually none or 'ds')
+    const match = signedXml.match(/<(\w+:)?Signature /);
+    const prefix = match && match[1] ? match[1] : '';
 
-    // Inject KeyInfo
-    signedXml = signedXml.replace('</ds:SignatureValue>', '</ds:SignatureValue>' + keyInfoXml);
+    const keyInfoXml = `
+<${prefix}KeyInfo>
+<${prefix}X509Data>
+<${prefix}X509Certificate>
+${certBody}
+</${prefix}X509Certificate>
+</${prefix}X509Data>
+<${prefix}KeyValue>
+<${prefix}RSAKeyValue>
+<${prefix}Modulus>
+${modulus}
+</${prefix}Modulus>
+<${prefix}Exponent>
+${exponent}
+</${prefix}Exponent>
+</${prefix}RSAKeyValue>
+</${prefix}KeyValue>
+</${prefix}KeyInfo>`.replace(/\n/g, '');
+
+    // Inject KeyInfo: Replace closing SignatureValue tag with itself + KeyInfo
+    // Regex handles potential namespace prefix in replacement
+    signedXml = signedXml.replace(new RegExp(`</(${prefix})?SignatureValue>`), `</${prefix}SignatureValue>${keyInfoXml}`);
 
     return signedXml;
 }
