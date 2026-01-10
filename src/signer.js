@@ -92,76 +92,37 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     </xades:SignedDataObjectProperties>
 </xades:SignedProperties>`.replace(/\n\s*/g, ''); // Minify execution to avoid C14N whitespace issues
 
-    // STRATEGY: Append SignedProperties to the XML *temporarily* so xml-crypto can find and hash it.
-    // We append it inside the root element so strict parsers don't complain about multiple roots.
-    // NOTE: This modifies 'xml' to 'xmlWithProps'
-    // We must ensure this temporary insertion matches what the 'xpath' expects.
-    // XPath `//*[@Id='...']` should find it anywhere.
+    // STRATEGY: DUMMY ROOT
+    // We wrap the invoice + properties in a dummy root.
+    // This allows xml-crypto to sign 'comprobante' (which is inside) without modifying it (no envelop signatures adding weirdness to the digest).
 
-    // Inject at the end of content, before closing root.
-    // Find closing tag of root (factura)
-    const rootClosingTag = '</factura>';
-    const xmlWithProps = xml.replace(rootClosingTag, signedPropertiesXml + rootClosingTag);
+    const rootXml = `<root>${xml}${signedPropertiesXml}</root>`;
 
-    // 7. Compute Signature on the Modified XML
+    // 7. Compute Signature on the Dummy Root XML
     try {
-        sig.computeSignature(xmlWithProps);
+        sig.computeSignature(rootXml);
     } catch (e) {
         console.error("Error computing signature:", e);
         throw e;
     }
 
-    // 8. Get Signed XML which now has Signature + SignedProperties (in body)
-    let signedXml = sig.getSignedXml();
+    // 8. Get Signed XML (Wrapped)
+    let signedRootXml = sig.getSignedXml();
 
-    // 9. CLEANUP: Move SignedProperties into the Signature Object
+    // 9. EXTRACTION & ASSEMBLY
+    // We need to extract the <Signature> block from signedRootXml
+    // And inject it into the ORIGINAL 'xml' (inside <factura>, before close).
 
-    // a. Remove the SignedProperties we injected in the body
-    // Using simple replacement since we know the exact string (if minified) or regex
-    // BE CAREFUL: sig.getSignedXml() returns the *original xml* (modified) PLUS the signature?
-    // xml-crypto usually inserts signature before root close.
-    // So signedXml likely looks like: <factura> ... <SignedProperties>...</SignedProperties> <Signature>...</Signature> </factura>
-    // OR <factura> ... <SignedProperties>...</SignedProperties> ... <Signature>... </factura>
+    // Extract Signature (Regex to handle potential prefixes)
+    const signatureRegex = /<(\w+:)?Signature[\s\S]*?<\/\1Signature>/;
+    const matchSigBlock = signedRootXml.match(signatureRegex);
 
-    // We need to cut out the <xades:SignedProperties... </xades:SignedProperties> block
-    // And paste it inside <ds:Object><xades:QualifyingProperties ...>...
+    if (!matchSigBlock) throw new Error("No se pudo generar el bloque de firma");
 
-    // Regex to extract the Full Node
-    const propsRegex = /<xades:SignedProperties[\s\S]*?<\/xades:SignedProperties>/;
-    const matchProps = signedXml.match(propsRegex);
+    let signatureBlock = matchSigBlock[0];
 
-    if (!matchProps) {
-        console.error("Could not find SignedProperties in signed XML to move it.");
-        // Fallback?
-    } else {
-        const extractedProps = matchProps[0];
-
-        // Remove from body
-        signedXml = signedXml.replace(extractedProps, '');
-
-        // Prepare Object Wrapper
-        // Structure: <ds:Object><xades:QualifyingProperties Target="#SignatureId"><SignedProperties...
-        // We need the Signature ID? SRI signatures might not require Signature ID if Target is implied? 
-        // Standard XAdES: QualifyingProperties Target="#SignatureId" is common. 
-        // xml-crypto auto-generates Signature Id? usually simply 'Signature' or none.
-        // Let's check signedXml for Signature ID.
-
-        // Detect prefix again to inject correctly (KeyInfo was step 9 before, now we do this too)
-        const matchSig = signedXml.match(/<(\w+:)?Signature /);
-        const prefix = matchSig && matchSig[1] ? matchSig[1] : '';
-
-        // We also need to ensure Signature has Id="Signature" so the Target matches
-        // Regex replace Signature tag
-        signedXml = signedXml.replace(/<(\w+:)?Signature /, `<$1Signature Id="Signature" `);
-
-        // Use prefix for Object wrapper to match Signature namespace
-        const objectXml = `<${prefix}Object><xades:QualifyingProperties Target="#Signature" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">${extractedProps}</xades:QualifyingProperties></${prefix}Object>`;
-
-        // Append Object to Signature (before closing </ds:Signature>)
-        signedXml = signedXml.replace(new RegExp(`</(${prefix})?Signature>`), `${objectXml}</${prefix}Signature>`);
-    }
-
-    // 10. Manual KeyInfo Injection (From previous step, keeping it for robustness)
+    // Now we need to inject KeyInfo and Object into this signatureBlock
+    // KeyInfo first
     const certBody = certPem.replace(/-----BEGIN CERTIFICATE-----/g, '')
         .replace(/-----END CERTIFICATE-----/g, '')
         .replace(/\r\n/g, '')
@@ -170,7 +131,7 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     const modulus = Buffer.from(privateKey.n.toString(16), 'hex').toString('base64');
     const exponent = Buffer.from(privateKey.e.toString(16), 'hex').toString('base64');
 
-    const matchSig = signedXml.match(/<(\w+:)?Signature /);
+    const matchSig = signatureBlock.match(/<(\w+:)?Signature /);
     const prefix = matchSig && matchSig[1] ? matchSig[1] : '';
 
     const keyInfoXml = `
@@ -192,17 +153,33 @@ ${exponent}
 </${prefix}KeyValue>
 </${prefix}KeyInfo>`.replace(/\n/g, '');
 
-    // Inject KeyInfo: Replace closing SignatureValue with itself + KeyInfo
-    // Be careful not to replace twice if we ran before? 
-    // Just replace once.
-    signedXml = signedXml.replace(new RegExp(`</(${prefix})?SignatureValue>`), `</${prefix}SignatureValue>${keyInfoXml}`);
+    // Inject KeyInfo
+    signatureBlock = signatureBlock.replace(new RegExp(`</(${prefix})?SignatureValue>`), `</${prefix}SignatureValue>${keyInfoXml}`);
+
+    // Object Injection (QualifyingProperties)
+    // We ensure Signature has Id="Signature"
+    signatureBlock = signatureBlock.replace(/<(\w+:)?Signature /, `<$1Signature Id="Signature" `);
+
+    const objectXml = `<${prefix}Object><xades:QualifyingProperties Target="#Signature" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">${signedPropertiesXml}</xades:QualifyingProperties></${prefix}Object>`;
+
+    // Append Object
+    signatureBlock = signatureBlock.replace(new RegExp(`</(${prefix})?Signature>`), `${objectXml}</${prefix}Signature>`);
+
+    // 10. Final Assembly: Inject fully constructed Signature into ORIGINAL xml
+    // Finding closing tag of 'factura' (or whatever root)
+    // The 'xml' input is the invoice XML.
+    const rootClosingTag = '</factura>'; // Simplify assumption based on context
+    // Or regex for last closing tag?
+    // xml.lastIndexOf('</') ...
+
+    const finalXml = xml.replace(rootClosingTag, signatureBlock + rootClosingTag);
 
     // CHECK: Are we sending the FULL CHAIN? 
     // `certBag.cert` is usually just the leaf. P12 often has the chain.
     // We might need to include the FULL CHAIN in X509Data or just the leaf?
     // SRI usually accepts just the leaf if it's a known CA.
 
-    return signedXml;
+    return finalXml;
 }
 
 module.exports = { signInvoiceXmlCustom };
