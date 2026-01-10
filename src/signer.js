@@ -28,8 +28,8 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     // 3. Configure Signing Key
     // Set BOTH legacy and new properties to be safe against version mismatch
     sig.key = keyPem;
-    sig.signingKey = Buffer.from(keyPem);
-    console.log("   [DEBUG SIGNER] sig.signingKey set (Buffer). Length:", sig.signingKey.length);
+    sig.signingKey = keyPem;
+    console.log("   [DEBUG SIGNER] sig.signingKey set (String). Length:", sig.signingKey.length);
 
     // 4. Configure Algorithms (SRI needs SHA1)
     sig.signatureAlgorithm = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
