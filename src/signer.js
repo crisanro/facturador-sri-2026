@@ -115,9 +115,37 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     // Check if xml-crypto will likely use 'ds' prefix or default.
     // Based on recent logs: <Signature xmlns="http://www.w3.org/2000/09/xmldsig#"> (Default)
 
+    // Check if xml-crypto will likely use 'ds' prefix or default.
+    // Based on recent logs: <Signature xmlns="http://www.w3.org/2000/09/xmldsig#"> (Default)
+
     const rootXml = `<root>${xml}<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"><Object>${signedPropertiesXml}</Object></Signature></root>`;
 
     // 7. Compute Signature on the Dummy Root XML
+
+    // PATCH: Override createReferences to inject 'Type' attribute for SignedProperties
+    // xml-crypto 6.x defaults don't seem to write 'Type' even if passed in options.
+    const originalCreateReferences = sig.createReferences.bind(sig);
+    sig.createReferences = function (params) {
+        // Call original to get the Reference XMLs (concatenated string)
+        let references = originalCreateReferences(params);
+
+        // Inject Type attribute for SignedProperties reference
+        // We know the ID is signedPropsId
+        // The original string will have <Reference URI="#SignedProperties-...">
+        // We want <Reference URI="#SignedProperties-..." Type="http://uri.etsi.org/01903#SignedProperties">
+
+        const uriTarget = '#' + signedPropsId;
+        const typeAttr = ' Type="http://uri.etsi.org/01903#SignedProperties"';
+
+        // Use Replace with strict match
+        references = references.replace(
+            `URI="${uriTarget}">`,
+            `URI="${uriTarget}"${typeAttr}>`
+        );
+
+        return references;
+    };
+
     // Reference URI points to #SignedProperties, which is inside the dummy Signature.
     try {
         sig.computeSignature(rootXml);
