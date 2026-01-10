@@ -23,10 +23,11 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
 
     // 2. Setup xml-crypto SignedXml
     console.log("   [DEBUG SIGNER] xml-crypto version:", require('xml-crypto/package.json').version);
-    const sig = new SignedXml();
+    // Try passing privateKey in options if supported, or just init
+    const sig = new SignedXml({ privateKey: keyPem });
 
     // 3. Configure Signing Key
-    // Set BOTH legacy and new properties to be safe against version mismatch
+    // Set properties explicitly too
     sig.key = keyPem;
     sig.signingKey = keyPem;
     console.log("   [DEBUG SIGNER] sig.signingKey set (String). Length:", sig.signingKey.length);
