@@ -146,9 +146,6 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
         // xml-crypto auto-generates Signature Id? usually simply 'Signature' or none.
         // Let's check signedXml for Signature ID.
 
-        // Let's wrap SignedProperties in QualifyingProperties
-        const objectXml = `<ds:Object><xades:QualifyingProperties Target="#Signature" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">${extractedProps}</xades:QualifyingProperties></ds:Object>`;
-
         // Detect prefix again to inject correctly (KeyInfo was step 9 before, now we do this too)
         const matchSig = signedXml.match(/<(\w+:)?Signature /);
         const prefix = matchSig && matchSig[1] ? matchSig[1] : '';
@@ -156,6 +153,9 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
         // We also need to ensure Signature has Id="Signature" so the Target matches
         // Regex replace Signature tag
         signedXml = signedXml.replace(/<(\w+:)?Signature /, `<$1Signature Id="Signature" `);
+
+        // Use prefix for Object wrapper to match Signature namespace
+        const objectXml = `<${prefix}Object><xades:QualifyingProperties Target="#Signature" xmlns:xades="http://uri.etsi.org/01903/v1.3.2#">${extractedProps}</xades:QualifyingProperties></${prefix}Object>`;
 
         // Append Object to Signature (before closing </ds:Signature>)
         signedXml = signedXml.replace(new RegExp(`</(${prefix})?Signature>`), `${objectXml}</${prefix}Signature>`);
