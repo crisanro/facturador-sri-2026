@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const { DateTime } = require('luxon'); // Import luxon
 const forge = require('node-forge');
 const { create } = require('xmlbuilder2');
 const { signInvoiceXml } = require('ec-sri-invoice-signer');
@@ -47,7 +48,9 @@ async function procesarFacturaCompleta(inputCliente) {
     const calculos = calcularTotalesEImpuestos(inputCliente.items);
 
     // --- D. GENERAR XML ---
-    const hoy = new Date().toISOString().split('T')[0];
+    // FIX: Usar zona horaria de Ecuador (UTC-5) para evitar fechas futuras (UTC)
+    const hoy = DateTime.now().setZone('America/Guayaquil').toFormat('yyyy-MM-dd');
+
     // Nota: El ambiente viene de la BD del emisor (1 o 2)
     const claveAcceso = generarClaveAcceso(hoy, '01', emisor.ruc, emisor.ambiente.toString(), '001001', secuencialStr);
 
