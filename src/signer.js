@@ -42,16 +42,31 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
     // Generate the QualifyingProperties Object
 
     // Hash the certificate for SigningCertificate
+    // IMPORTANT: SRI usually expects SHA1 of the DER encoded certificate.
     const certDer = forge.asn1.toDer(forge.pki.certificateToAsn1(certificate)).getBytes();
     const certHash = crypto.createHash('sha1').update(certDer, 'binary').digest('base64');
 
     // Get Issuer details for SigningCertificate
+    // SRI often requires the EXACT string from the certificate, reversed?
+    // Let's rely on node-forge's attribute mapping but ensure logic matches X509 standard.
+    // X509IssuerName should be valid RFC4514 string.
+    // Example: CN=AC BANCO CENTRAL DEL ECUADOR,L=QUITO,OU=ENTIDAD DE CERTIFICACION DE INFORMACION-ECIBCE,O=BANCO CENTRAL DEL ECUADOR,C=EC
+
+    // We need to verify if spaces after commas are required. SRI examples usually have them.
     const issuerName = certificate.issuer.attributes
         .map(attr => `${attr.shortName}=${attr.value}`)
         .reverse()
-        .join(', '); // Comma space usually
+        .join(', ');
 
-    const serialNumber = certificate.serialNumber;
+    // Serial Number: usually decimal string, but some CAs provide hex.
+    // Forge usually parses it as Hex string or BigInteger.
+    // SRI XAdES often expects Decimal for SerialNumber if it's an integer, or simple string?
+    // Let's check certificate.serialNumber in Forge. It's a hex string usually.
+    // We might need to convert Hex to Decimal if SRI demands integer.
+    // BUT many examples show plain numbers. Let's try converting to Decimal BigInt string.
+
+    const serialNumberHex = certificate.serialNumber;
+    const serialNumberDec = BigInt('0x' + serialNumberHex).toString(); // Convert hex to decimal string
 
     // Generate Random ID for SignedProperties
     const signedPropsId = 'SignedProperties-' + crypto.randomBytes(10).toString('hex');
@@ -79,7 +94,7 @@ function signInvoiceXmlCustom(xml, certBag, keyBag) {
                 </xades:CertDigest>
                 <xades:IssuerSerial>
                     <ds:X509IssuerName>${issuerName}</ds:X509IssuerName>
-                    <ds:X509SerialNumber>${serialNumber}</ds:X509SerialNumber>
+                    <ds:X509SerialNumber>${serialNumberDec}</ds:X509SerialNumber>
                 </xades:IssuerSerial>
             </xades:Cert>
         </xades:SigningCertificate>
