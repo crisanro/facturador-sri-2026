@@ -1,18 +1,14 @@
-const { createClient } = require('@supabase/supabase-js');
-const { DateTime } = require('luxon'); // Import luxon
+const { supabase } = require('./supabaseClient');
+const { DateTime } = require('luxon');
 const forge = require('node-forge');
 const { create } = require('xmlbuilder2');
-const { signInvoiceXml } = require('ec-sri-invoice-signer');
-const fs = require('fs');
-const path = require('path');
 const axios = require('axios');
 const { XMLParser } = require('fast-xml-parser');
 const { generarClaveAcceso } = require('./utils');
 const { calcularTotalesEImpuestos } = require('./calculadoraSri');
 const { signInvoiceXmlCustom } = require('./signer');
+const { downloadFile, uploadFile } = require('./storageService');
 
-// Iniciar Supabase
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const parser = new XMLParser({ ignoreAttributes: false });
 
 const URLS_SRI = {
@@ -26,32 +22,25 @@ const URLS_SRI = {
     }
 };
 
-async function procesarFacturaCompleta(inputCliente) {
-    console.log("1. Iniciando proceso para:", inputCliente.rucEmisor);
-    console.log("   Datos recibidos:", JSON.stringify(inputCliente).substring(0, 100)); // Log breve
+/**
+ * Procesa la factura completa, firmando y enviando al SRI.
+ * @param {Object} inputCliente - Datos de la factura enviados por el cliente
+ * @param {Object} emisor - Datos del emisor obtenidos en el Auth Middleware
+ */
+async function procesarFacturaCompleta(inputCliente, emisor) {
+    console.log(`[SRI] Iniciando proceso para RUC: ${emisor.ruc}, Secuencial: ${emisor.secuencial_actual + 1}`);
 
-    // --- A. BUSCAR EMISOR EN BD ---
-    const { data: emisor, error } = await supabase
-        .from('emisores')
-        .select('*')
-        .eq('ruc', inputCliente.rucEmisor)
-        .single();
-
-    if (error || !emisor) throw new Error("Emisor no encontrado en Supabase. ¿Ya lo registraste?");
-
-    // --- B. SECUENCIAL ---
+    // --- 1. SECUENCIAL ---
     const nuevoSecuencial = emisor.secuencial_actual + 1;
     const secuencialStr = nuevoSecuencial.toString().padStart(9, '0');
+    // Actualizamos secuencial en Supabase
     await supabase.from('emisores').update({ secuencial_actual: nuevoSecuencial }).eq('id', emisor.id);
 
-    // --- C. CALCULOS MATEMÁTICOS ---
+    // --- 2. CÁLCULOS ---
     const calculos = calcularTotalesEImpuestos(inputCliente.items);
 
-    // --- D. GENERAR XML ---
-    // FIX: Usar zona horaria de Ecuador (UTC-5) para evitar fechas futuras (UTC)
+    // --- 3. GENERAR XML ---
     const hoy = DateTime.now().setZone('America/Guayaquil').toFormat('yyyy-MM-dd');
-
-    // Nota: El ambiente viene de la BD del emisor (1 o 2)
     const claveAcceso = generarClaveAcceso(hoy, '01', emisor.ruc, emisor.ambiente.toString(), '001001', secuencialStr);
 
     const doc = create({ version: '1.0', encoding: 'UTF-8' }).ele('factura', { id: 'comprobante', version: '1.1.0' });
@@ -64,24 +53,19 @@ async function procesarFacturaCompleta(inputCliente) {
     infoTrib.ele('ruc').txt(emisor.ruc);
     infoTrib.ele('claveAcceso').txt(claveAcceso);
     infoTrib.ele('codDoc').txt('01');
-    infoTrib.ele('estab').txt('001'); // Podrías parametrizar esto en la BD también
-    infoTrib.ele('ptoEmi').txt('001');
+    infoTrib.ele('estab').txt(emisor.establecimiento || '001');
+    infoTrib.ele('ptoEmi').txt(emisor.punto_emision || '001');
     infoTrib.ele('secuencial').txt(secuencialStr);
     infoTrib.ele('dirMatriz').txt(emisor.direccion_matriz);
 
-    // --- NUEVO: RIMPE y Agente de Retención ---
-    if (emisor.contribuyente_rimpe) {
-        infoTrib.ele('contribuyenteRimpe').txt(emisor.contribuyente_rimpe);
-    }
-    if (emisor.agente_retencion) {
-        infoTrib.ele('agenteRetencion').txt(emisor.agente_retencion);
-    }
+    if (emisor.contribuyente_rimpe) infoTrib.ele('contribuyenteRimpe').txt(emisor.contribuyente_rimpe);
+    if (emisor.agente_retencion) infoTrib.ele('agenteRetencion').txt(emisor.agente_retencion);
 
     // Info Factura
     const infoFac = doc.ele('infoFactura');
     infoFac.ele('fechaEmision').txt(hoy.split('-').reverse().join('/'));
     infoFac.ele('dirEstablecimiento').txt(emisor.direccion_matriz);
-    infoFac.ele('obligadoContabilidad').txt('NO');
+    infoFac.ele('obligadoContabilidad').txt(emisor.obligado_contabilidad || 'NO');
     infoFac.ele('tipoIdentificacionComprador').txt(inputCliente.cliente.tipoId);
     infoFac.ele('razonSocialComprador').txt(inputCliente.cliente.razonSocial);
     infoFac.ele('identificacionComprador').txt(inputCliente.cliente.identificacion);
@@ -102,9 +86,7 @@ async function procesarFacturaCompleta(inputCliente) {
     infoFac.ele('moneda').txt('DOLAR');
 
     const pagos = infoFac.ele('pagos');
-
-    // --- NUEVO: Formas de Pago Dinámicas ---
-    if (inputCliente.pagos && Array.isArray(inputCliente.pagos) && inputCliente.pagos.length > 0) {
+    if (inputCliente.pagos && inputCliente.pagos.length > 0) {
         inputCliente.pagos.forEach(pagoItem => {
             const p = pagos.ele('pago');
             p.ele('formaPago').txt(pagoItem.formaPago);
@@ -113,8 +95,7 @@ async function procesarFacturaCompleta(inputCliente) {
             if (pagoItem.unidadTiempo) p.ele('unidadTiempo').txt(pagoItem.unidadTiempo);
         });
     } else {
-        // Fallback por defecto: Código 20 (Otros con utilización del sistema financiero)
-        pagos.ele('pago').ele('formaPago').txt('20').up().ele('total').txt(calculos.totales.importeTotal);
+        pagos.ele('pago').ele('formaPago').txt('01').up().ele('total').txt(calculos.totales.importeTotal);
     }
 
     // Detalles
@@ -140,80 +121,63 @@ async function procesarFacturaCompleta(inputCliente) {
 
     const xmlString = doc.end({ prettyPrint: false });
 
-    // --- E. FIRMAR XML ---
-    // NOTA: Para producción, el P12 no debería estar en archivo local sino en storage seguro o base64 en BD.
-    // Por ahora leemos del archivo local que subirás.
-    // --- FILTER P12 (FIX FIRMA INVALIDA) ---
-    // Extract ONLY the certificate with 'Digital Signature' capability
-    const p12BufferOriginal = fs.readFileSync(path.join(__dirname, '../firmas/firma.p12'));
-    let p12BufferToUse = p12BufferOriginal;
-    const password = emisor.firma_password;
+    // --- 4. FIRMAR XML ---
+    // Descargamos la firma desde MinIO
+    if (!emisor.p12_path) throw new Error("El emisor no tiene configurada una firma (P12) en storage.");
+
+    const [bucket, ...pathParts] = emisor.p12_path.split('/');
+    const p12FileName = pathParts.join('/');
+
+    console.log(`[MinIO] Descargando firma: ${p12FileName} desde bucket: ${bucket}`);
+    const p12Buffer = await downloadFile(bucket, p12FileName);
+    const password = emisor.p12_pass;
 
     let targetCertBag = null;
     let targetKeyBag = null;
 
     try {
-        const p12Asn1 = forge.asn1.fromDer(p12BufferOriginal.toString('binary'));
+        const p12Asn1 = forge.asn1.fromDer(p12Buffer.toString('binary'));
         const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
         const safes = p12.safeContent || p12.safeContents;
 
-        console.log("   [FIX] Buscando certificado y llave manual...");
-
         safes.forEach(sc => {
             sc.safeBags.forEach(sb => {
-                // 1. Is Certificate?
                 if (sb.type === forge.pki.oids.certBag) {
                     const cert = sb.cert || (sb.attributes && sb.attributes.cert);
                     if (cert) {
                         const ku = cert.getExtension('keyUsage');
                         if (ku && ku.digitalSignature) {
-                            console.log("   [FIX] Certificado de firma encontrado:", cert.subject.getField('CN').value);
                             targetCertBag = sb;
                         }
                     }
-                }
-                // 2. Is Private Key?
-                else if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
+                } else if (sb.type === forge.pki.oids.pkcs8ShroudedKeyBag || sb.type === forge.pki.oids.keyBag) {
                     targetKeyBag = sb;
                 }
             });
         });
-
     } catch (e) {
-        console.error("   [FIX ERROR] Error al parsear P12 para extracción de certificado:", e.message);
+        throw new Error("Error procesando certificado P12: " + e.message);
     }
 
-    let xmlFirmado = '';
-    if (targetCertBag && targetKeyBag) {
-        console.log("   [FIX] Usando Custom Signer con certificado verificado...");
-        try {
-            // Usamos nuestro firmador manual pasando los objetos Forge directos
-            xmlFirmado = signInvoiceXmlCustom(xmlString, targetCertBag, targetKeyBag);
-            console.log("   [FIX] FIRMA CUSTOM GENERADA EXITOSAMENTE!");
-            console.log("   [DEBUG XML TAIL] ... " + xmlFirmado.slice(-500)); // Ver cómo cierra
-        } catch (errSign) {
-            console.error("   [FIX ERROR] Falló firma custom:", errSign);
-            throw errSign;
-        }
-    } else {
-        console.log("   [FIX WARNING] No se encontró certificado válido. Usando método legacy...");
-        xmlFirmado = signInvoiceXml(xmlString, p12BufferOriginal, { pkcs12Password: password });
-    }
+    if (!targetCertBag || !targetKeyBag) throw new Error("No se encontró certificado de firma digital válido en el archivo P12.");
 
-    // --- F. GUARDAR EN BD (ESTADO: FIRMADO) ---
-    const { data: facturaDB } = await supabase.from('facturas').insert({
+    const xmlFirmado = signInvoiceXmlCustom(xmlString, targetCertBag, targetKeyBag);
+
+    // --- 5. GUARDAR XML FIRMADO EN MINIO ---
+    const xmlSignedFileName = `signed/${emisor.ruc}/${claveAcceso}.xml`;
+    await uploadFile('invoices', xmlSignedFileName, Buffer.from(xmlFirmado), 'text/xml');
+
+    // --- 6. REGISTRAR EN DB (ESTADO: FIRMADO) ---
+    const { data: facturaDB } = await supabase.from('invoices').insert({
         emisor_id: emisor.id,
         clave_acceso: claveAcceso,
-        secuencial: secuencialStr,
-        total_sin_impuestos: calculos.totales.totalSinImpuestos,
-        total_iva: calculos.totales.totalIva,
+        xml_path: `invoices/${xmlSignedFileName}`,
         importe_total: calculos.totales.importeTotal,
-        xml_generado: xmlFirmado,
-        estado_sri: 'FIRMADO'
+        estado: 'FIRMADO'
     }).select().single();
 
-    // --- G. ENVIAR AL SRI ---
-    const urls = emisor.ambiente === 2 ? URLS_SRI.produccion : URLS_SRI.pruebas;
+    // --- 7. ENVIAR AL SRI ---
+    const urls = emisor.ambiente === '2' ? URLS_SRI.produccion : URLS_SRI.pruebas; // '2' es prod
     const xmlBase64 = Buffer.from(xmlFirmado).toString('base64');
 
     const soapRecepcion = `
@@ -225,20 +189,16 @@ async function procesarFacturaCompleta(inputCliente) {
     </soapenv:Envelope>`;
 
     try {
-        console.log("Enviando a SRI Recepción...");
         const { data: dataRecepcion } = await axios.post(urls.recepcion, soapRecepcion, {
             headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
         });
 
-        // Parsear respuesta Recepción
         const jsonRecepcion = parser.parse(dataRecepcion);
         const respuesta = jsonRecepcion['soap:Envelope']['soap:Body']['ns2:validarComprobanteResponse']['RespuestaRecepcionComprobante'];
 
         if (respuesta.estado === 'RECIBIDA') {
-            // Actualizar BD a RECIBIDA
-            await supabase.from('facturas').update({ estado_sri: 'RECIBIDA' }).eq('id', facturaDB.id);
+            await supabase.from('invoices').update({ estado: 'RECIBIDA' }).eq('id', facturaDB.id);
 
-            // Pedir Autorización
             const soapAutorizacion = `
             <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ec="http://ec.gob.sri.ws.autorizacion">
                <soapenv:Header/>
@@ -247,48 +207,46 @@ async function procesarFacturaCompleta(inputCliente) {
                </soapenv:Body>
             </soapenv:Envelope>`;
 
-            console.log("Solicitando Autorización...");
             const { data: dataAuth } = await axios.post(urls.autorizacion, soapAutorizacion, {
                 headers: { 'Content-Type': 'text/xml;charset=UTF-8' }
             });
 
             const jsonAuth = parser.parse(dataAuth);
             const respAuth = jsonAuth['soap:Envelope']['soap:Body']['ns2:autorizacionComprobanteResponse']['RespuestaAutorizacionComprobante'];
-
-            // Chequear si se autorizó
             const autorizacion = respAuth.autorizaciones?.autorizacion;
-            const objAuth = Array.isArray(autorizacion) ? autorizacion[0] : autorizacion; // Manejar si es array u objeto
+            const objAuth = Array.isArray(autorizacion) ? autorizacion[0] : autorizacion;
 
             const estadoFinal = objAuth?.estado || 'DESCONOCIDO';
             const xmlAutorizado = objAuth?.comprobante;
-            const mensajes = objAuth?.mensajes; // Capturar mensajes de error/advertencia
 
-            // Actualizar BD FINAL
-            await supabase.from('facturas').update({
-                estado_sri: estadoFinal,
-                xml_autorizado: xmlAutorizado,
-                mensaje_error: mensajes ? JSON.stringify(mensajes) : null // Guardar error en BD si existe
+            // Si se autorizó, subimos el XML autorizado (que contiene la fecha de autorización) a MinIO
+            let xmlPathFinal = facturaDB.xml_path;
+            if (xmlAutorizado) {
+                const xmlAuthFileName = `authorized/${emisor.ruc}/${claveAcceso}.xml`;
+                await uploadFile('invoices', xmlAuthFileName, Buffer.from(xmlAutorizado), 'text/xml');
+                xmlPathFinal = `invoices/${xmlAuthFileName}`;
+            }
+
+            // Descontar Crédito
+            if (estadoFinal === 'AUTORIZADO') {
+                await supabase.rpc('descontar_credito', { emisor_uuid: emisor.id });
+            }
+
+            await supabase.from('invoices').update({
+                estado: estadoFinal,
+                xml_path: xmlPathFinal
             }).eq('id', facturaDB.id);
 
-            const resultadoExito = { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado, mensajes };
-
-
-            console.log("RETORNANDO EXITO:", resultadoExito.estado);
-            return resultadoExito;
+            return { exito: true, estado: estadoFinal, claveAcceso, xmlAutorizado, mensajes: objAuth?.mensajes };
 
         } else {
-            // Error en Recepción (ej: Clave duplicada)
-            await supabase.from('facturas').update({
-                estado_sri: 'DEVUELTA',
-                mensaje_error: JSON.stringify(respuesta.comprobantes)
-            }).eq('id', facturaDB.id);
-            console.log("RETORNANDO ERROR RECEPCION");
-            return { exito: false, estado: 'DEVUELTA', error: respuesta };
+            const errorMsg = JSON.stringify(respuesta.comprobantes);
+            await supabase.from('invoices').update({ estado: 'DEVUELTA' }).eq('id', facturaDB.id);
+            return { exito: false, estado: 'DEVUELTA', error: errorMsg };
         }
 
     } catch (err) {
-        console.error("Error de Red/SRI", err);
-        console.error("Error de Red/SRI", err);
+        console.error("[SRI ERROR]", err.message);
         return { exito: false, error: err.message };
     }
 }
